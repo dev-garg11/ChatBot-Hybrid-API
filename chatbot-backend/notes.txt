@@ -1,0 +1,13 @@
+1) pgvector=it is used to store embedding which is numerical numbers in database
+  example=embedding VECTOR(384)
+
+2)fastapi=create backend api for chatbot 
+  example=POST/chat, GET/fag
+
+3)pypdf=reads PDF file and extracts text without this we can not extract document content
+
+4) sentence_transformers=USED TO CONVERTING TEXT INTO NUMERAICS CALLED vector
+
+5) psycopg2=it connects python to databse and allows to execute SQL commands from python code
+
+6)pdf loader=used to load pdf , extract text and convert it into vector and store in dataase 
