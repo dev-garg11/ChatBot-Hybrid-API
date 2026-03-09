@@ -3,7 +3,7 @@ import os
 import sys
 import selectors
 
-# project root path add karo
+# Add project root path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text
@@ -25,19 +25,19 @@ async def load_faq():
         )
         count = result.scalar()
         if count > 0:
-            print("⚠️ FAQ already loaded hai — skip kar raha hoon")
+            print("⚠️ FAQ already loaded — skipping")
             return
 
     print(f"PDF path: {PDF_PATH}")
-    print("Step 1 — PDF se Q&A extract ho raha hai...")
+    print("Step 1 — Extracting Q&A from PDF...")
 
     qa_pairs = extract_faq_from_pdf(PDF_PATH)
 
     if not qa_pairs:
-        print("❌ Koi Q&A nahi mila — PDF ka format check karo")
+        print("❌ No Q&A found — check the PDF format")
         return
 
-    print(f"✅ Total Q&A mila: {len(qa_pairs)}")
+    print(f"✅ Total Q&A found: {len(qa_pairs)}")
 
     async with AsyncSessionLocal() as db:
 
@@ -47,7 +47,7 @@ async def load_faq():
         await db.flush()
         print(f"✅ Document saved — ID: {document.id}")
 
-        print("Step 2 — Vectors bana ke DB mein save ho raha hai...")
+        print("Step 2 — Creating vectors and saving them to the database...")
 
         for index, pair in enumerate(qa_pairs):
 
@@ -55,24 +55,24 @@ async def load_faq():
 
             # Question + vector
             question = FaqQuestion(
-                document_id     = document.id,
-                question_text   = pair["question"],
-                question_vector = get_vector(pair["question"])
+                document_id=document.id,
+                question_text=pair["question"],
+                question_vector=get_vector(pair["question"])
             )
             db.add(question)
             await db.flush()
 
             # Answer + vector
             answer = FaqAnswer(
-                question_id   = question.id,
-                answer_text   = pair["answer"],
-                answer_vector = get_vector(pair["answer"])
+                question_id=question.id,
+                answer_text=pair["answer"],
+                answer_vector=get_vector(pair["answer"])
             )
             db.add(answer)
 
         await db.commit()
 
-    print(f"\n✅ Done! {len(qa_pairs)} Q&A DB mein save ho gaye")
+    print(f"\n✅ Done! {len(qa_pairs)} Q&A saved in the database")
 
 
 if __name__ == "__main__":
