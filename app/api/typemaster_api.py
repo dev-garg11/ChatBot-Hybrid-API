@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession 
 from app.core.database import get_db
 from app.dtos.TypeMaster.request_dto import TypeMasterRequestDto
-from app.dtos.TypeMaster.response_dto import TypeMasterRequestDto
+from app.dtos.TypeMaster.response_dto import TypeMasterResponseDto
 from app.entites.type_master_entitie import TypeMaster
 from app.utilis.response import ApiResponse
-from datetime import datetime
+from datetime import datetime, timezone
 router = APIRouter(prefix="/TypeMaster", tags=["TypeMaster"])
 
 @router.post("", response_model=ApiResponse)
@@ -16,7 +16,7 @@ async def AddTypeMaster(
     mapped_data = TypeMaster(
         type_name=request.type_name,
         description=request.description,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         is_active=True
     )
     db.add(mapped_data)
@@ -28,7 +28,7 @@ async def AddTypeMaster(
         status_code=201,
         message="TypeMaster created successfully",
         data={
-            "id": request.type_name,
-            "name": request.description
+            "id": mapped_data. type_master_id,
+            "name": mapped_data.type_name
         }
     )

@@ -6,6 +6,8 @@ from sqlalchemy import pool
 from alembic import context
 from app.core.base import Base
 from app.entites.type_master_entitie import TypeMaster
+from app.entites.faq_entities import FaqDocument, FaqQuestion, FaqAnswer  # ✅ add karo
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

@@ -1,5 +1,6 @@
 from pydantic import BaseModel
-class Faq(BaseModel):
-    typeMasterId: int
+
+class FaqAnswerResponseDto(BaseModel):
     question: str
     answer: str
+    similarity: float
