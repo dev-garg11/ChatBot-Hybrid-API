@@ -1,9 +1,10 @@
+from app.core.database import AsyncSessionLocal
+from sqlalchemy import text
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.router import router
-from app.core.database import AsyncSessionLocal
 from app.utilis.spell_service import load_dictionary
 from app.utilis.cache import VOCAB_CACHE
 

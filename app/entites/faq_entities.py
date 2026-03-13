@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey, String, Bool
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 from app.core.base import Base
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 class FaqDocument(Base):
@@ -10,7 +10,7 @@ class FaqDocument(Base):
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     file_name   = Column(String(255), nullable=False)
-    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
     is_active   = Column(Boolean, default=True)
 
     questions = relationship("FaqQuestion", back_populates="document")
@@ -23,7 +23,7 @@ class FaqQuestion(Base):
     document_id     = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
     question_text   = Column(Text, nullable=False)
     question_vector = Column(Vector(384))
-    created_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at      = Column(DateTime, default=datetime.utcnow)
 
     document = relationship("FaqDocument", back_populates="questions")
     answer   = relationship("FaqAnswer", back_populates="question", uselist=False)
@@ -36,6 +36,6 @@ class FaqAnswer(Base):
     question_id   = Column(Integer, ForeignKey("faq_questions.id"), nullable=False)
     answer_text   = Column(Text, nullable=False)
     answer_vector = Column(Vector(384))
-    created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at    = Column(DateTime, default=datetime.utcnow)
 
     question = relationship("FaqQuestion", back_populates="answer")

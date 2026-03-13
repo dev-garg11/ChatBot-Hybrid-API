@@ -1,3 +1,5 @@
+# This module provides spell correction functionality using the SymSpell algorithm.
+
 from symspellpy import SymSpell
 
 sym_spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)

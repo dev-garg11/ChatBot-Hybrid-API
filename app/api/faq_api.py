@@ -8,21 +8,19 @@ from app.utilis.spell_service import correct_sentence
 from rapidfuzz import process
 import re
 from app.utilis.cache import VOCAB_CACHE
+from app.utilis.llm_service import generate_llm_answer
 
 router = APIRouter(prefix="/faq", tags=["FAQ"])
 
-SIMILARITY_THRESHOLD = 0.75
+SIMILARITY_THRESHOLD = 0.65
 
 
 # ----------------------------
 # Text Normalize
 # ----------------------------
 def normalize_text(text: str) -> str:
-
     text = text.lower()
-
     text = re.sub(r"[^a-z0-9\s]", "", text)
-
     return text.strip()
 
 
@@ -74,7 +72,9 @@ def split_words(text: str, vocab: list):
     return " ".join(result)
 
 
-# fixed typo dynamically
+# ----------------------------
+# Dynamic Word Fix
+# ----------------------------
 def dynamic_word_fix(word, vocab):
 
     if len(word) < 3:
@@ -89,24 +89,37 @@ def dynamic_word_fix(word, vocab):
 
 
 # ----------------------------
-# Query Preprocessing Pipeline
+# Query Preprocessing
 # ----------------------------
 def preprocess_query(text: str, vocab: list):
 
-    # 1 normalize
     text = normalize_text(text)
-
-    # 2 spell correction
     text = correct_sentence(text)
-
-    # 3 split compound words
     text = split_words(text, vocab)
 
-    # 4 dynamic fuzzy correction
     words = text.split()
     words = [dynamic_word_fix(w, vocab) for w in words]
 
     return " ".join(words)
+
+
+# ----------------------------
+# Query Splitting
+# ----------------------------
+def split_query(query: str):
+
+    parts = re.split(r'\band\b|[.,?&/;]', query)
+
+    questions = []
+
+    for p in parts:
+        p = p.strip()
+
+        if len(p) > 3:
+            questions.append(p)
+
+    return questions
+
 
 # ----------------------------
 # Search API
@@ -117,17 +130,15 @@ async def search_faq(
     db: AsyncSession = Depends(get_db)
 ):
 
-    # load vocab from cache
     vocab = VOCAB_CACHE
 
-    # Query cleaning
-    clean_query = preprocess_query(query, vocab)
-
     print(f"Original Query: {query}")
-    print(f"Clean Query: {clean_query}")
 
-    # Generate vector
-    query_vector = get_vector(clean_query)
+    # Split query into multiple questions
+    questions = split_query(query)
+    print("Split Questions:", questions)
+
+    answers = []
 
     sql = text("""
         SELECT
@@ -139,44 +150,74 @@ async def search_faq(
         JOIN faq_documents fd ON fd.id = fq.document_id
         WHERE fd.is_active = true
         ORDER BY fq.question_vector <=> CAST(:qv AS vector)
-        LIMIT 1
+        LIMIT 5
     """)
 
-    result = await db.execute(sql, {"qv": str(query_vector)})
+    # Search loop for each question
+    for q in questions:
 
-    row = result.fetchone()
+        if "receipt" not in q:
+            q = q + " receipt"
 
-    if not row:
-        return ApiResponse(
-            success=False,
-            status_code=404,
-            message="No answer found for the query",
-            data=None
-        )
+        clean_query = preprocess_query(q, vocab)
 
-    similarity = float(row.similarity)
+        print(f"Processing Question: {q}")
+        print(f"Clean Query: {clean_query}")
 
-    if similarity < SIMILARITY_THRESHOLD:
-        return ApiResponse(
-            success=False,
-            status_code=404,
-            message="No relevant answer found for the query",
-            data={
-                "original_query": query,
-                "cleaned_query": clean_query,
+        query_vector = get_vector(clean_query)
+
+        result = await db.execute(sql, {"qv": str(query_vector)})
+        rows = result.fetchall()
+
+        for row in rows:
+
+            similarity = float(row.similarity)
+
+            if similarity < SIMILARITY_THRESHOLD:
+                continue
+
+            answers.append({
+                "question": row.question_text,
+                "answer": row.answer_text,
                 "similarity": round(similarity, 3)
-            }
+            })
+
+    if not answers:
+        return ApiResponse(
+            success=False,
+            status_code=404,
+            message="No relevant answers found",
+            data={"query": query}
         )
+
+    # Remove duplicate answers
+    unique_answers = {a["question"]: a for a in answers}
+    answers = list(unique_answers.values())
+
+        # ----------------------------
+    # Build context for LLM
+    # ----------------------------
+    context = ""
+
+    for a in answers:
+            context += f"""
+    Question: {a['question']}
+    Answer: {a['answer']}
+    """
+            
+    # ----------------------------
+    # LLM Call
+    # ----------------------------
+    llm_response = generate_llm_answer(query, context)
+
 
     return ApiResponse(
         success=True,
         status_code=200,
-        message="Answer found for the query",
+        message="Answers genrated successfully",
         data={
             "original_query": query,
-            "cleaned_query": clean_query,
-            "question": row.question_text,
-            "answer": row.answer_text,
-            "similarity": round(similarity, 3)
+            "llm_answer": llm_response,
+            "vector_results": answers
         }
     )
