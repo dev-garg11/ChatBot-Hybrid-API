@@ -67,20 +67,20 @@ FINAL ANSWER:
 
                     chunk = json_data.get("response", "")
                     if chunk:
-                        yield f"data: {chunk}\n\n"
+                        yield chunk
 
                 except Exception as e:
                     print(f"Stream parse error: {e}")
                     continue
 
             # ✅ signal completion
-            yield "data: [DONE]\n\n"
+            yield "[DONE]"
 
     except httpx.ReadTimeout:
-        yield "data: LLM request timed out\n\n"
+        yield "LLM request timed out"
 
     except httpx.ConnectError:
-        yield "data: LLM server not reachable\n\n"
+        yield "LLM server not reachable"
 
     except Exception as e:
         yield f"data: LLM error: {str(e)}\n\n"

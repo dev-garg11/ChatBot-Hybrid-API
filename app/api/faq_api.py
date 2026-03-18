@@ -1,4 +1,5 @@
 import asyncio
+from asyncio import tasks
 import re
 import time
 import logging
@@ -33,6 +34,9 @@ MAX_QUERY_LENGTH = 300
 
 # simple in-memory cache
 RESPONSE_CACHE = {}
+
+# Vector cache
+VECTOR_CACHE = {}
 
 # ----------------------------
 # Text Normalize
@@ -116,8 +120,59 @@ def vector_to_str(vector) -> str:
     return "[" + ",".join(map(str, vector)) + "]"
 
 # ----------------------------
+# Cached vector retrieval
+# ----------------------------
+async def get_vector_cached(clean_query: str):
+    if clean_query in VECTOR_CACHE:
+        return VECTOR_CACHE[clean_query]
+
+    vector = await asyncio.to_thread(get_vector, clean_query)
+
+    VECTOR_CACHE[clean_query] = vector
+    return vector
+
+
+# ----------------------------
 # CORE RETRIEVAL FUNCTION
 # ----------------------------
+
+# ----------------------------
+# Process single query (mainly for streaming API)
+# ----------------------------
+async def process_single_query(q, db, vocab, sql):
+    clean_query = preprocess_query(q, vocab)
+
+    query_vector = await get_vector_cached(clean_query)
+
+    result = await db.execute(sql, {"qv": vector_to_str(query_vector)})
+    rows = result.fetchall()
+
+    temp_answers = []
+
+    for row in rows:
+        similarity = float(row.similarity)
+
+        if similarity < SIMILARITY_THRESHOLD:
+            continue
+
+        query_words = set(clean_query.split())
+        question_words = set(row.question_text.lower().split())
+
+        common_words = query_words & question_words
+        keyword_score = len(common_words) / max(len(query_words), 1)
+
+        temp_answers.append({
+            "question": row.question_text,
+            "answer": row.answer_text,
+            "similarity": similarity + keyword_score
+        })
+
+    return temp_answers
+
+# ----------------------------
+# Get answers for a query (used by both normal and streaming API)
+# ----------------------------
+
 async def get_answers(query: str, db: AsyncSession):
 
     vocab = VOCAB_CACHE
@@ -139,30 +194,19 @@ async def get_answers(query: str, db: AsyncSession):
         LIMIT 5
     """)
 
-    for q in all_queries:
-        clean_query = await asyncio.to_thread(preprocess_query, q, vocab)
-        query_vector = await asyncio.to_thread(get_vector, clean_query)
+    tasks = [
+    process_single_query(q, db, vocab, sql)
+    for q in all_queries
+            ]
 
-        result = await db.execute(sql, {"qv": vector_to_str(query_vector)})
-        rows = result.fetchall()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for row in rows:
-            similarity = float(row.similarity)
-
-            if similarity < SIMILARITY_THRESHOLD:
-                continue
-
-            # ✅ keyword boost (hybrid ranking)
-            keyword_score = 0.1 if clean_query in row.question_text.lower() else 0
-
-            answers.append({
-                "question": row.question_text,
-                "answer": row.answer_text,
-                "similarity": similarity + keyword_score
-            })
-
-    if not answers:
-        return []
+    answers = []
+    for res in results:
+        if isinstance(res, Exception):
+            logger.error(f"Error processing query: {res}")
+        else:
+            answers.extend(res)
 
     unique_answers = {}
     for a in answers:
@@ -205,7 +249,7 @@ async def search_faq(
     )
 
     try:
-        llm_response = await asyncio.to_thread(generate_llm_answer, query, context)
+        llm_response = await generate_llm_answer(query, context)
     except Exception as e:
         logger.error(f"LLM Error: {e}")
         llm_response = "LLM failed"
@@ -259,14 +303,25 @@ async def search_faq_stream(
     async def event_generator():
         yield "event: start\ndata: Generating answer...\n\n"
 
+        buffer = ""
+
         async for chunk in generate_llm_stream(query, context):
 
-            # ✅ client disconnect handling
             if await request.is_disconnected():
-                logger.info("Client disconnected")
+                logger.warning("Client disconnected")
                 break
 
-            yield f"event: chunk\ndata: {chunk}\n\n"
+            if chunk == "[DONE]":
+                break
+
+            buffer += chunk
+
+            if len(buffer) > 30:
+                yield f"data: {buffer}\n\n"
+                buffer = ""
+
+        if buffer:
+            yield f"data: {buffer}\n\n"
 
         yield "event: end\ndata: done\n\n"
 

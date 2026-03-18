@@ -4,9 +4,7 @@ from app.core.config import settings
 engine = create_async_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,
-    echo=True
-    # ✅ connect_args wali line remove kar di — ssl psycopg mein alag hota hai
-)
+    echo=False)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
