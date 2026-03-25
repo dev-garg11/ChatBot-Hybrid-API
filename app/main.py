@@ -1,4 +1,13 @@
+import logging
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
+from transformers import logging as hf_logging
+hf_logging.set_verbosity_error()
+
+from app.core.database import AsyncSessionLocal
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -10,10 +19,12 @@ from app.entites.faq_entities import FaqDocument, FaqQuestion
 # router
 from app.api.router import router
 
+
 # database session
 from app.core.database import AsyncSessionLocal
 
 # utilities
+
 from app.utilis.spell_service import load_dictionary
 from app.utilis.cache import VOCAB_CACHE
 

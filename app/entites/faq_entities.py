@@ -21,14 +21,18 @@ class FaqDocument(Base):
     is_active = Column(Boolean, default=True)  # agar boolean hai
     created_at = Column(DateTime, default=datetime.utcnow)  # agar datetime haiclass FaqDocument(Base):
     __tablename__ = "faq_documents"
-
-     
     
     questions = relationship(
         "FaqQuestion",
         back_populates="document",
         cascade="all, delete"
     )
+
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    file_name   = Column(String(255), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    is_active   = Column(Boolean, default=True)
+
 
     @classmethod
     async def create(cls, db: AsyncSession, file_name: str):
@@ -93,8 +97,12 @@ class FaqQuestion(Base):
 
     question_text = Column(Text, nullable=False)
     question_vector = Column(Vector(384))
+
     created_at = Column(DateTime, default=datetime.utcnow)
     status = Column(Boolean, default=True)
+
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
 
     document = relationship("FaqDocument", back_populates="questions")
     
@@ -152,7 +160,14 @@ class FaqQuestion(Base):
 class FaqAnswer(Base):
     __tablename__ = "faq_answers"
 
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    question_id   = Column(Integer, ForeignKey("faq_questions.id"), nullable=False)
+    answer_text   = Column(Text, nullable=False)
+    answer_vector = Column(Vector(384))
+    created_at    = Column(DateTime, default=datetime.utcnow)
 
     question_id = Column(
         Integer,
