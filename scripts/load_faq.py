@@ -13,7 +13,7 @@ from app.entites.faq_entities import FaqDocument, FaqQuestion, FaqAnswer
 from app.utilis.pdf_extracter import extract_faq_from_pdf
 from app.utilis.vector_service import get_vector
 
-PDF_PATH = "app/data/faq.pdf"
+PDF_PATH = "http://10.147.8.83:70/faq.pdf"
 
 
 async def load_faq():

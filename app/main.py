@@ -2,7 +2,6 @@ import logging
 
 
 logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
@@ -45,6 +44,7 @@ async def load_resources():
         vocab = list(set(vocab))
 
         # vocab cache
+        VOCAB_CACHE.clear()
         VOCAB_CACHE.extend(vocab)
 
         # spell dictionary

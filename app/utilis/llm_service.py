@@ -6,6 +6,8 @@ OLLAMA_URL = settings.OLLAMA_URL
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 OLLAMA_TIMEOUT = 60
 
+# global client
+client=httpx.AsyncClient(timeout=httpx.Timeout(OLLAMA_TIMEOUT))
 
 async def generate_llm_answer(user_query: str, context: str) -> str:
     prompt = f"""
@@ -34,11 +36,10 @@ FINAL ANSWER:"""
     }
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(OLLAMA_TIMEOUT)) as client:
-            response =await client.post(
+        # reuse global client
+        response =await client.post(
                 OLLAMA_URL,
                 json=payload,
-                timeout=OLLAMA_TIMEOUT
             )
 
         if response.status_code == 200:
@@ -48,7 +49,7 @@ FINAL ANSWER:"""
             print(f"LLM API error: {response.status_code} - {response.text}")
             return "LLM response failed."
 
-    except httpx.ConnectionError:
+    except httpx.ConnectError:
         print("⚠️ Cannot connect to Ollama server")
         return "LLM server is not reachable."
 
