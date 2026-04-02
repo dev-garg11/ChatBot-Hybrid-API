@@ -17,9 +17,9 @@ from app.utilis.pdf_extracter import extract_faq_from_pdf
 from app.utilis.cache import VOCAB_CACHE
 from app.utilis.llm_service import generate_llm_answer
 from app.utilis.llm_stream_service import generate_llm_stream
-from app.entites.faq_entities import FaqQuestion
 from rapidfuzz import process
 from dotenv import load_dotenv
+from app.entites.faq_entities import FaqQuestion  # ✅ typo fix: entites -> entities
 load_dotenv()
 
 # ----------------------------
@@ -37,11 +37,10 @@ MAX_QUERY_LENGTH     = 300
 UPLOAD_DIR           = "data"
 BACKUP_DIR_FAQ       = r"C:\chatbot_data\faq"
 BACKUP_DIR_PDFS      = r"C:\chatbot_data\pdfs"
-SERVER_BASE_URL      = "http://10.147.8.83:70"
-
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR_FAQ, exist_ok=True)
 os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8000")  # ✅ fix
 
 RESPONSE_CACHE = {}
 VECTOR_CACHE   = {}
@@ -49,10 +48,12 @@ VECTOR_CACHE   = {}
 # ----------------------------
 # ROUTERS
 # ----------------------------
+router          = APIRouter()
 faq_router      = APIRouter(prefix="/faq", tags=["FAQ"])
 question_router = APIRouter(prefix="/faq", tags=["Question"])
 answer_router   = APIRouter(prefix="/faq", tags=["Answer"])
 document_router = APIRouter(prefix="/faq", tags=["Document"])
+
 
 # ----------------------------
 # HELPER FUNCTIONS
@@ -95,12 +96,13 @@ def preprocess_query(input_text: str, vocab: list) -> str:
     input_text = normalize_text(input_text)
     input_text = correct_sentence(input_text)
     input_text = split_words(input_text, vocab)
-    words = [dynamic_word_fix(w, vocab) for w in input_text.split()]
+    words      = input_text.split()
+    words      = [dynamic_word_fix(w, vocab) for w in words]
     return " ".join(words)
 
 
 def split_query(query: str) -> list[str]:
-    parts = re.split(r'\band\b|[.,?&/;]', query)
+    parts     = re.split(r'\band\b|[.,?&/;]', query)
     questions = [p.strip() for p in parts if len(p.strip()) > 2]
     return questions if questions else [query.strip()]
 
@@ -153,8 +155,8 @@ async def get_answers(query: str, db: AsyncSession):
             fa.answer_text,
             1 - (fq.question_vector <=> CAST(:qv AS vector)) AS similarity
         FROM faq_questions fq
-        JOIN faq_answers fa  ON fa.question_id = fq.id
-        JOIN faq_documents fd ON fd.id = fq.document_id
+        JOIN faq_answers   fa ON fa.question_id  = fq.id
+        JOIN faq_documents fd ON fd.id           = fq.document_id
         WHERE fd.status = true
         ORDER BY fq.question_vector <=> CAST(:qv AS vector)
         LIMIT 5
@@ -375,9 +377,10 @@ async def update_question(
 
         await db.execute(text("""
             UPDATE faq_questions
-            SET question_text = :question, question_vector = :vector,
-                type_master_id = COALESCE(:type_id, type_master_id),
-                document_id = COALESCE(:doc_id, document_id)
+            SET question_text  = :question,
+                question_vector = :vector,
+                type_master_id  = COALESCE(:type_id, type_master_id),
+                document_id     = COALESCE(:doc_id, document_id)
             WHERE id = :id
         """), {"question": clean_question, "vector": str(vector), "type_id": type_id,
                "doc_id": safe_document_id, "id": question_id})
@@ -396,8 +399,8 @@ async def delete_question(question_id: int, db: AsyncSession = Depends(get_db)):
         if not result.fetchone():
             return ApiResponse(success=False, status_code=404, message="Question not found")
 
-        await db.execute(text("DELETE FROM faq_answers WHERE question_id = :id"), {"id": question_id})
-        await db.execute(text("DELETE FROM faq_questions WHERE id = :id"), {"id": question_id})
+        await db.execute(text("DELETE FROM faq_answers   WHERE question_id = :id"), {"id": question_id})
+        await db.execute(text("DELETE FROM faq_questions WHERE id = :id"),           {"id": question_id})
         await db.commit()
 
         return ApiResponse(success=True, status_code=200, message="Question deleted successfully",
@@ -453,7 +456,8 @@ async def update_answer(answer_id: int, answer: str = Body(...), db: AsyncSessio
         if not result.fetchone():
             return ApiResponse(success=False, status_code=404, message="Answer not found")
 
-        await db.execute(text("UPDATE faq_answers SET answer_text = :answer WHERE id = :id"), {"answer": answer, "id": answer_id})
+        await db.execute(text("UPDATE faq_answers SET answer_text = :answer WHERE id = :id"),
+                         {"answer": answer, "id": answer_id})
         await db.commit()
 
         return ApiResponse(success=True, status_code=200, message="Answer updated successfully",
@@ -489,21 +493,17 @@ async def add_document(type_id: int, file: UploadFile = File(...), db: AsyncSess
 
         file_bytes = await file.read()
 
-        # Server pe save karo
         server_file_path = os.path.join(BACKUP_DIR_PDFS, file.filename)
         os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
         with open(server_file_path, "wb") as f:
             f.write(file_bytes)
 
-        # Local data folder mein bhi save karo
         local_file_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(local_file_path, "wb") as f:
             f.write(file_bytes)
 
-        # Public URL generate karo
         public_url = f"{SERVER_BASE_URL}/pdfs/{file.filename}"
 
-        # Database mein register karo
         doc_result = await db.execute(text("""
             INSERT INTO faq_documents (file_name, file_path, type_id, is_active, status)
             VALUES (:name, :file_path, :type_id, true, true) RETURNING id
@@ -511,7 +511,6 @@ async def add_document(type_id: int, file: UploadFile = File(...), db: AsyncSess
         document_id = doc_result.scalar()
         await db.commit()
 
-        # Q&A extract karo
         qa_pairs = extract_faq_from_pdf(local_file_path)
         if not qa_pairs:
             return ApiResponse(success=False, status_code=404, message="No Q&A found in PDF",
@@ -633,7 +632,7 @@ async def delete_document(document_id: int, db: AsyncSession = Depends(get_db)):
             )
         """), {"did": document_id})
         await db.execute(text("DELETE FROM faq_questions WHERE document_id = :did"), {"did": document_id})
-        await db.execute(text("DELETE FROM faq_documents WHERE id = :id"), {"id": document_id})
+        await db.execute(text("DELETE FROM faq_documents WHERE id = :id"),           {"id": document_id})
         await db.commit()
 
         for folder in [UPLOAD_DIR, BACKUP_DIR_PDFS, BACKUP_DIR_FAQ]:
@@ -648,10 +647,10 @@ async def delete_document(document_id: int, db: AsyncSession = Depends(get_db)):
 
 
 # ============================================================
-# LLM SEARCH ENDPOINTS
+# NORMAL API
 # ============================================================
-@faq_router.get("/search-llm", response_model=ApiResponse, summary="LLM-powered FAQ Search")
-async def search_faq_llm(
+@router.get("/search", response_model=ApiResponse)
+async def search_faq(
     query: str = Query(...),
     db: AsyncSession = Depends(get_db)
 ):
@@ -664,11 +663,17 @@ async def search_faq_llm(
         logger.info("Cache hit")
         return RESPONSE_CACHE[query]
 
+    logger.info(f"Query received: {query}")
+
     answers = await get_answers(query, db)
+
     if not answers:
         return ApiResponse(False, 404, "No relevant answers found", {"query": query})
 
-    context = "\n\n".join(f"Question: {a['question']}\nAnswer: {a['answer']}" for a in answers)
+    context = "\n\n".join(
+        f"Question: {a['question']}\nAnswer: {a['answer']}"
+        for a in answers
+    )
 
     try:
         llm_response = await generate_llm_answer(query, context)
@@ -676,14 +681,21 @@ async def search_faq_llm(
         logger.error(f"LLM Error: {e}")
         llm_response = "LLM failed"
 
-    response = ApiResponse(success=True, status_code=200, message="Answers generated successfully",
-                           data={"original_query": query, "llm_answer": llm_response, "vector_results": answers})
+    response = ApiResponse(
+        success=True, status_code=200,
+        message="Answers generated successfully",
+        data={"original_query": query, "llm_answer": llm_response, "vector_results": answers}
+    )
+
     RESPONSE_CACHE[query] = response
     logger.info(f"Time taken: {time.time() - start_time:.2f}s")
     return response
 
 
-@faq_router.get("/search-stream", summary="Streaming FAQ Search")
+# ============================================================
+# STREAMING API
+# ============================================================
+@router.get("/search-stream")
 async def search_faq_stream(
     request: Request,
     query:   str = Query(...),
@@ -693,17 +705,21 @@ async def search_faq_stream(
         return StreamingResponse(iter(["data: Query too long\n\n"]), media_type="text/event-stream")
 
     answers = await get_answers(query, db)
+
     if not answers:
         return StreamingResponse(iter(["data: No relevant answers found\n\n"]), media_type="text/event-stream")
 
-    context = "\n\n".join(f"Question: {a['question']}\nAnswer: {a['answer']}" for a in answers)
+    context = "\n\n".join(
+        f"Question: {a['question']}\nAnswer: {a['answer']}"
+        for a in answers
+    )
 
     async def event_generator():
         yield "event: start\ndata: Generating answer...\n\n"
         buffer = ""
+
         async for chunk in generate_llm_stream(query, context):
             if await request.is_disconnected():
-                logger.warning("Client disconnected")
                 break
             if chunk == "[DONE]":
                 break
@@ -711,8 +727,10 @@ async def search_faq_stream(
             if len(buffer) > 30:
                 yield f"data: {buffer}\n\n"
                 buffer = ""
+
         if buffer:
             yield f"data: {buffer}\n\n"
+
         yield "event: end\ndata: done\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream") 
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

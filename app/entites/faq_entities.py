@@ -15,17 +15,14 @@ from typing import Optional
 class FaqDocument(Base):
     __tablename__ = "faq_documents"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    file_name = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=True)
-
-    # ✅ FIXED HERE
-    type_id = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
-
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    file_name   = Column(String(255), nullable=False)
+    file_path   = Column(String(500), nullable=True)
+    type_id     = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-    is_active = Column(Boolean, default=True)
-    status = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active   = Column(Boolean, default=True)
+    status      = Column(Boolean, default=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)
 
     questions = relationship(
         "FaqQuestion",
@@ -59,17 +56,14 @@ class FaqDocument(Base):
     async def delete(cls, db: AsyncSession, document_id: int, soft: bool = True):
         result = await db.execute(select(cls).where(cls.id == document_id))
         doc = result.scalar_one_or_none()
-
         if not doc:
             return False
-
         if soft:
             doc.status = False
             await db.commit()
         else:
             await db.delete(doc)
             await db.commit()
-
         return True
 
 
@@ -79,29 +73,16 @@ class FaqDocument(Base):
 class FaqQuestion(Base):
     __tablename__ = "faq_questions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    document_id = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
-
-    # ✅ FIXED HERE
-    type_master_id = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
-
-    question_text = Column(Text, nullable=False)
-
+    id              = Column(Integer, primary_key=True, autoincrement=True)
+    document_id     = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
+    type_master_id  = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
+    question_text   = Column(Text, nullable=False)
     question_vector = Column(Vector(384))
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    status          = Column(Boolean, default=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    status = Column(Boolean, default=True)
-
-    document = relationship("FaqDocument", back_populates="questions")
-
-    answers = relationship(
-        "FaqAnswer",
-        back_populates="question",
-        cascade="all, delete"
-    )
-
+    document    = relationship("FaqDocument", back_populates="questions")
+    answers     = relationship("FaqAnswer", back_populates="question", cascade="all, delete")
     type_master = relationship("TypeMaster", back_populates="questions")
 
     @classmethod
@@ -119,13 +100,9 @@ class FaqQuestion(Base):
             question_vector=question_vector,
             type_master_id=type_master_id,
         )
-
         db.add(question)
-
         await db.commit()
-
         await db.refresh(question)
-
         return question
 
     @classmethod
@@ -138,19 +115,14 @@ class FaqQuestion(Base):
     @classmethod
     async def get_by_document(cls, db: AsyncSession, document_id: int):
         result = await db.execute(
-            select(cls).where(
-                and_(cls.document_id == document_id, cls.status == True)
-            )
+            select(cls).where(and_(cls.document_id == document_id, cls.status == True))
         )
         return result.scalars().all()
-
-
 
 
 # ----------------------------
 # Answer Table
 # ----------------------------
-
 class FaqAnswer(Base):
     __tablename__ = "faq_answers"
 
@@ -159,57 +131,12 @@ class FaqAnswer(Base):
     answer_text   = Column(Text, nullable=False)
     answer_vector = Column(Vector(384))
     created_at    = Column(DateTime, default=datetime.utcnow)
+    status        = Column(Boolean, default=True)
 
-    question = relationship("FaqQuestion", back_populates="answer")
+    question = relationship("FaqQuestion", back_populates="answers")
 
-
-    
-class PdfQuestion(Base):
-    __tablename__ = "pdf_questions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
-    question_text = Column(Text, nullable=False)
-    question_vector = Column(Vector(384))  # all-MiniLM = 384 dimensions
-    question_id = Column(Integer, ForeignKey("faq_questions.id"), nullable=False)
-    answer_text = Column(Text, nullable=False)
-    answer_vector = Column(Vector(384))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    status = Column(Boolean, default=True)
-
-    # Relationship
-    answers = relationship("PdfAnswer", back_populates="question")
-
-
-class PdfAnswer(Base):
-   __tablename__ = "pdf_answers"
-
-   id = Column(Integer, primary_key=True, index=True)
-   question_id = Column(Integer, ForeignKey("pdf_questions.id"), nullable=False)
-   answer_text = Column(Text, nullable=False)
-   answer_vector = Column(Vector(384))  # all-MiniLM = 384 dimensions
-   created_at = Column(DateTime, default=datetime.utcnow)
-   status = Column(Boolean, default=True)
-   image_paths = Column(Text, nullable=True)  # ✅ JSON string
-   
-   # Relationship
-   question = relationship("PdfQuestion", back_populates="answers")
-
-   question_id = Column(Integer,ForeignKey("faq_questions.id"),nullable=False)
-
-   answer_text = Column(Text, nullable=False)
-   answer_vector = Column(Vector(384))
-   created_at = Column(DateTime, default=datetime.utcnow)
-   status = Column(Boolean, default=True)
-
-   question = relationship(
-        "FaqQuestion",
-        back_populates="answers"
-    )
-   question = relationship("FaqQuestion", back_populates="answers")
-
-@classmethod
-async def create(
+    @classmethod
+    async def create(
         cls,
         db: AsyncSession,
         question_id: int,
@@ -221,12 +148,40 @@ async def create(
             answer_text=answer_text,
             answer_vector=answer_vector,
         )
-
         db.add(answer)
-
         await db.commit()
-
         await db.refresh(answer)
-
         return answer
 
+
+# ----------------------------
+# PDF Question Table
+# ----------------------------
+class PdfQuestion(Base):
+    __tablename__ = "pdf_questions"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    document_id     = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
+    question_text   = Column(Text, nullable=False)
+    question_vector = Column(Vector(384))
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    status          = Column(Boolean, default=True)
+
+    answers = relationship("PdfAnswer", back_populates="question")
+
+
+# ----------------------------
+# PDF Answer Table
+# ----------------------------
+class PdfAnswer(Base):
+    __tablename__ = "pdf_answers"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    question_id   = Column(Integer, ForeignKey("pdf_questions.id"), nullable=False)
+    answer_text   = Column(Text, nullable=False)
+    answer_vector = Column(Vector(384))
+    image_paths   = Column(Text, nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    status        = Column(Boolean, default=True)
+
+    question = relationship("PdfQuestion", back_populates="answers")
