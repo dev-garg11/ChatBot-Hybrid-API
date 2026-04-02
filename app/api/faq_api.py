@@ -19,6 +19,7 @@ from app.utilis.llm_service import generate_llm_answer
 from app.utilis.llm_stream_service import generate_llm_stream
 from rapidfuzz import process
 from dotenv import load_dotenv
+from app.entites.faq_entities import FaqQuestion
 load_dotenv()
 # ----------------------------
 # LOGGER
@@ -38,6 +39,7 @@ BACKUP_DIR_PDFS = r"C:\chatbot_data\pdfs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR_FAQ, exist_ok=True)
 os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8000")
 
 RESPONSE_CACHE = {}
 
@@ -47,6 +49,7 @@ VECTOR_CACHE = {}
 # ----------------------------
 # 4 Alag Routers
 # ----------------------------
+router = APIRouter()
 
 faq_router      = APIRouter(prefix="/faq", tags=["FAQ"])
 question_router = APIRouter(prefix="/faq", tags=["Question"])
@@ -863,11 +866,8 @@ async def search_faq_stream(
     )
 
     async def event_generator():
-        yield f"event: source\ndata: {source}\n\n"
         yield "event: start\ndata: Generating answer...\n\n"
-
         buffer = ""
-
         async for chunk in generate_llm_stream(query, context):
 
             if await request.is_disconnected():
