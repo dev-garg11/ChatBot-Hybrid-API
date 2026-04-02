@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, select
 from pgvector.sqlalchemy import Vector
 from app.core.base import Base
+from app.entites.type_master_entitie import TypeMaster
 from datetime import datetime
 from typing import Optional
 
@@ -13,26 +14,24 @@ from typing import Optional
 # ----------------------------
 class FaqDocument(Base):
     __tablename__ = "faq_documents"
-    
-    id = Column(Integer, primary_key=True)
-    file_name = Column(String, nullable=False)
-    file_path = Column(String, nullable=False, unique=True)
-    type_id = Column(Integer, ForeignKey("type_master.id"))
-    is_active = Column(Boolean, default=True)  # agar boolean hai
-    created_at = Column(DateTime, default=datetime.utcnow)  # agar datetime haiclass FaqDocument(Base):
-    __tablename__ = "faq_documents"
-    
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_name = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=True)
+
+    # ✅ FIXED HERE
+    type_id = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
+
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    status = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
     questions = relationship(
         "FaqQuestion",
         back_populates="document",
         cascade="all, delete"
     )
-
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    file_name   = Column(String(255), nullable=False)
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
-    is_active   = Column(Boolean, default=True)
-
 
     @classmethod
     async def create(cls, db: AsyncSession, file_name: str):
@@ -82,37 +81,27 @@ class FaqQuestion(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    document_id = Column(
-        Integer,
-        ForeignKey("faq_documents.id"),
-        nullable=False
-    )
+    document_id = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
 
-    # ✅ NAYA — TypeMaster se link
-    type_master_id = Column(
-        Integer,
-        ForeignKey("type_master.type_master_id"),
-        nullable=True
-    )
+    # ✅ FIXED HERE
+    type_master_id = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
 
     question_text = Column(Text, nullable=False)
+
     question_vector = Column(Vector(384))
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
     status = Column(Boolean, default=True)
 
-    created_at      = Column(DateTime, default=datetime.utcnow)
-
-
     document = relationship("FaqDocument", back_populates="questions")
-    
+
     answers = relationship(
         "FaqAnswer",
         back_populates="question",
         cascade="all, delete"
     )
 
-    # ✅ NAYA — TypeMaster relationship
     type_master = relationship("TypeMaster", back_populates="questions")
 
     @classmethod
@@ -122,17 +111,19 @@ class FaqQuestion(Base):
         document_id: int,
         question_text: str,
         question_vector: Optional[list[float]] = None,
-        type_master_id: Optional[int] = None,  # ✅ NAYA
+        type_master_id: Optional[int] = None,
     ):
         question = cls(
             document_id=document_id,
             question_text=question_text,
             question_vector=question_vector,
-            type_master_id=type_master_id,  # ✅ NAYA
+            type_master_id=type_master_id,
         )
 
         db.add(question)
+
         await db.commit()
+
         await db.refresh(question)
 
         return question
@@ -160,30 +151,19 @@ class FaqQuestion(Base):
 class FaqAnswer(Base):
     __tablename__ = "faq_answers"
 
-
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    id            = Column(Integer, primary_key=True, autoincrement=True)
-    question_id   = Column(Integer, ForeignKey("faq_questions.id"), nullable=False)
-    answer_text   = Column(Text, nullable=False)
-    answer_vector = Column(Vector(384))
-    created_at    = Column(DateTime, default=datetime.utcnow)
-
-    question_id = Column(
-        Integer,
-        ForeignKey("faq_questions.id"),
-        nullable=False
-    )
+    question_id = Column(Integer, ForeignKey("faq_questions.id"), nullable=False)
 
     answer_text = Column(Text, nullable=False)
+
     answer_vector = Column(Vector(384))
+
     created_at = Column(DateTime, default=datetime.utcnow)
+
     status = Column(Boolean, default=True)
 
-    question = relationship(
-        "FaqQuestion",
-        back_populates="answers"
-    )
+    question = relationship("FaqQuestion", back_populates="answers")
 
     @classmethod
     async def create(
@@ -200,7 +180,9 @@ class FaqAnswer(Base):
         )
 
         db.add(answer)
+
         await db.commit()
+
         await db.refresh(answer)
 
         return answer

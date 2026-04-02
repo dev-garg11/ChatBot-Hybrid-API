@@ -2,12 +2,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DATABASE_URL: str
-    OLLAMA_URL: str
-    OLLAMA_MODEL: str
-    
+    OLLAMA_URL: str = "http://localhost:11434"   # ← type: str, default: the URL
+    OLLAMA_MODEL: str = "llama3"                  # ← type: str, default: "llama3"
+
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_file_encoding="utf-8", 
+        env_file_encoding="utf-8",
         extra="ignore"
     )
 
