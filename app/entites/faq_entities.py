@@ -206,12 +206,10 @@ class PdfAnswer(Base):
         "FaqQuestion",
         back_populates="answers"
     )
+   question = relationship("FaqQuestion", back_populates="answers")
 
-    question = relationship("FaqQuestion", back_populates="answers")
-
-
-   @classmethod
-   async def create(
+@classmethod
+async def create(
         cls,
         db: AsyncSession,
         question_id: int,
