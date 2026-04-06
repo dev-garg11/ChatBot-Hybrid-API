@@ -177,12 +177,21 @@ async def get_answers(query: str, db: AsyncSession):
 
 @faq_router.get("/search", response_model=ApiResponse, summary="Search FAQ Question")
 async def search_faq_simple(
-    question: str = Query(..., description="User question"),
+    question: Optional[str] = Query(None, description="User question"),
+    query:    Optional[str] = Query(None, description="User query (same as question)"),
     db: AsyncSession = Depends(get_db)
 ):
+    # ✅ dono parameter accept karo - question ya query
+    search_text = question or query
+    if not search_text:
+        return ApiResponse(
+            success=False, status_code=400,
+            message="Please provide 'question' or 'query' parameter"
+        )
+
     try:
         vocab        = VOCAB_CACHE or []
-        clean_query  = preprocess_query(question, vocab)
+        clean_query  = preprocess_query(search_text, vocab)
         query_vector = get_vector(clean_query)
 
         if not query_vector:
@@ -310,9 +319,9 @@ async def get_faq_by_type(type_id: int, db: AsyncSession = Depends(get_db)):
 # SEARCH API (LLM)
 # ============================================================
 
-@router.get("/search", response_model=ApiResponse)
+@router.get("/search", response_model=ApiResponse, summary="Search FAQ with LLM")
 async def search_faq(
-    query: str = Query(...),
+    query: str = Query(..., description="User query"),
     db: AsyncSession = Depends(get_db)
 ):
     start_time = time.time()
@@ -360,10 +369,10 @@ async def search_faq(
 # STREAMING API
 # ============================================================
 
-@router.get("/search-stream")
+@router.get("/search-stream", summary="Search FAQ Stream")
 async def search_faq_stream(
     request: Request,
-    query:   str = Query(...),
+    query:   str = Query(..., description="User query"),
     db: AsyncSession = Depends(get_db)
 ):
     if len(query) > MAX_QUERY_LENGTH:
