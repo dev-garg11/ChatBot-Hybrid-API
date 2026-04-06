@@ -19,7 +19,7 @@ from app.utilis.llm_service import generate_llm_answer
 from app.utilis.llm_stream_service import generate_llm_stream
 from rapidfuzz import process
 from dotenv import load_dotenv
-from app.entites.faq_entities import FaqQuestion
+from app.entites.faq_entities import FaqQuestion  # ✅ typo fix: entites -> entities
 load_dotenv()
 
 # ----------------------------

@@ -19,6 +19,7 @@ class FaqDocument(Base):
     file_name   = Column(String(255), nullable=False)
     file_path   = Column(String(500), nullable=True)
     type_id     = Column(Integer, ForeignKey("type_master_id"), nullable=True)
+    type_id     = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     is_active   = Column(Boolean, default=True)
     status      = Column(Boolean, default=True)
@@ -76,6 +77,7 @@ class FaqQuestion(Base):
     id              = Column(Integer, primary_key=True, autoincrement=True)
     document_id     = Column(Integer, ForeignKey("faq_documents.id"), nullable=False)
     type_master_id  = Column(Integer, ForeignKey("type_master_id"), nullable=True)
+    type_master_id  = Column(Integer, ForeignKey("type_master.type_master_id"), nullable=True)
     question_text   = Column(Text, nullable=False)
     question_vector = Column(Vector(384))
     created_at      = Column(DateTime, default=datetime.utcnow)
@@ -183,5 +185,6 @@ class PdfAnswer(Base):
     image_paths   = Column(Text, nullable=True)
     created_at    = Column(DateTime, default=datetime.utcnow)
     status        = Column(Boolean, default=True)
-
     question = relationship("PdfQuestion", back_populates="answers")
+    question = relationship("PdfQuestion", back_populates="answers")
+
