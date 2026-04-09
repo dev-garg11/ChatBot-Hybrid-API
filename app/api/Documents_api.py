@@ -20,13 +20,12 @@ load_dotenv()
 
 document_router = APIRouter(prefix="/faq", tags=["Document"])
 
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "data")
-BACKUP_DIR_PDFS = os.getenv("PDF_FOLDER", r"C:\chatbot_data\pdfs")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
+BACKUP_DIR_PDFS = os.getenv("PDF_FOLDER", "/tmp/pdfs")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8000")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
-
 
 def normalize_text(input_text: str) -> str:
     input_text = input_text.lower()
@@ -34,20 +33,18 @@ def normalize_text(input_text: str) -> str:
     return input_text.strip()
 
 
-# ============================================================
-# PYDANTIC MODEL FOR UPDATE
-# ============================================================
-
+# -------------------------------
+# PYDANTIC MODEL
+# -------------------------------
 class DocumentUpdateRequest(BaseModel):
     type_id: Optional[int] = None
     is_active: Optional[bool] = None
     status: Optional[bool] = None
 
 
-# ============================================================
+# -------------------------------
 # ADD DOCUMENT
-# ============================================================
-
+# -------------------------------
 @document_router.post("/add-document", response_model=ApiResponse)
 async def add_document(
     type_id: int,
@@ -59,24 +56,24 @@ async def add_document(
             return ApiResponse(False, 400, "Only PDF files are allowed")
 
         file_bytes = await file.read()
-
         unique_filename = f"{uuid.uuid4()}_{file.filename}"
         server_file_path = os.path.join(BACKUP_DIR_PDFS, unique_filename)
         local_file_path = os.path.join(UPLOAD_DIR, unique_filename)
 
+        # Save PDF
         with open(server_file_path, "wb") as f:
             f.write(file_bytes)
-
         with open(local_file_path, "wb") as f:
             f.write(file_bytes)
 
         public_url = f"{SERVER_BASE_URL}/pdfs/{unique_filename}"
 
+        # Extract Q&A
         qa_pairs = extract_faq_from_pdf(local_file_path)
-
         if not qa_pairs:
             return ApiResponse(False, 404, "No Q&A found in PDF")
 
+        # Insert document
         doc_result = await db.execute(text("""
             INSERT INTO faq_documents (file_name, file_path, type_id, is_active, status)
             VALUES (:name, :file_path, :type_id, true, true)
@@ -86,14 +83,12 @@ async def add_document(
             "file_path": public_url,
             "type_id": type_id
         })
-
         document_id = doc_result.scalar()
 
         saved = 0
         skipped = 0
 
         for qa in qa_pairs:
-
             clean_question = normalize_text(qa["question"])
             answer_text = qa["answer"].strip()
 
@@ -101,36 +96,37 @@ async def add_document(
                 skipped += 1
                 continue
 
+            # Check existing
             existing = await db.execute(
                 select(FaqQuestion).where(
                     FaqQuestion.question_text == clean_question,
                     FaqQuestion.document_id == document_id
                 )
             )
-
             if existing.scalar_one_or_none():
                 skipped += 1
                 continue
 
+            # Generate vector
             vector = get_vector(clean_question)
-
             if not vector:
                 skipped += 1
                 continue
 
+            # Insert question (pgvector safe)
             q_result = await db.execute(text("""
                 INSERT INTO faq_questions (document_id, type_master_id, question_text, question_vector)
-                VALUES (:doc, :type, :question, :vector)
+                VALUES (:doc, :type, :question, :vector::vector)
                 RETURNING id
             """), {
                 "doc": document_id,
                 "type": type_id,
                 "question": clean_question,
-                "vector": json.dumps(vector)
+                "vector": vector  # pass list/tuple, not json.dumps
             })
-
             question_id = q_result.scalar()
 
+            # Insert answer
             await db.execute(text("""
                 INSERT INTO faq_answers (question_id, answer_text)
                 VALUES (:qid, :answer)
@@ -163,10 +159,9 @@ async def add_document(
         return ApiResponse(False, 500, "Something went wrong", str(e))
 
 
-# ============================================================
+# -------------------------------
 # GET ALL DOCUMENTS
-# ============================================================
-
+# -------------------------------
 @document_router.get("/documents", response_model=ApiResponse)
 async def get_all_documents(db: AsyncSession = Depends(get_db)):
     try:
@@ -181,18 +176,14 @@ async def get_all_documents(db: AsyncSession = Depends(get_db)):
         """))
 
         rows = result.fetchall()
-
-        documents = []
-
-        for r in rows:
-            documents.append({
-                "document_id": r.document_id,
-                "document_name": r.document_name,
-                "file_path": r.file_path,
-                "file_url": f"{SERVER_BASE_URL}/pdfs/{r.document_name}",
-                "type_id": r.type_id,
-                "created_at": str(r.created_at)
-            })
+        documents = [{
+            "document_id": r.document_id,
+            "document_name": r.document_name,
+            "file_path": r.file_path,
+            "file_url": f"{SERVER_BASE_URL}/pdfs/{r.document_name}",
+            "type_id": r.type_id,
+            "created_at": str(r.created_at)
+        } for r in rows]
 
         return ApiResponse(True, 200, "Documents fetched", documents)
 
@@ -200,10 +191,9 @@ async def get_all_documents(db: AsyncSession = Depends(get_db)):
         return ApiResponse(False, 500, "Something went wrong", str(e))
 
 
-# ============================================================
+# -------------------------------
 # UPDATE DOCUMENT
-# ============================================================
-
+# -------------------------------
 @document_router.put("/update-document/{document_id}", response_model=ApiResponse)
 async def update_document(
     document_id: int,
@@ -215,7 +205,6 @@ async def update_document(
             text("SELECT id FROM faq_documents WHERE id = :id"),
             {"id": document_id}
         )
-
         if not result.fetchone():
             return ApiResponse(False, 404, "Document not found")
 
@@ -238,7 +227,6 @@ async def update_document(
             return ApiResponse(False, 400, "No fields provided to update")
 
         query = f"UPDATE faq_documents SET {', '.join(fields)} WHERE id = :id"
-
         await db.execute(text(query), params)
         await db.commit()
 
@@ -249,21 +237,17 @@ async def update_document(
         return ApiResponse(False, 500, "Update failed", str(e))
 
 
-# ============================================================
+# -------------------------------
 # DELETE DOCUMENT
-# ============================================================
-
+# -------------------------------
 @document_router.delete("/delete-document/{document_id}", response_model=ApiResponse)
 async def delete_document(document_id: int, db: AsyncSession = Depends(get_db)):
     try:
-
         result = await db.execute(
             text("SELECT file_name FROM faq_documents WHERE id = :id"),
             {"id": document_id}
         )
-
         row = result.fetchone()
-
         if not row:
             return ApiResponse(False, 404, "Document not found")
 
@@ -287,7 +271,6 @@ async def delete_document(document_id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()
 
         filename = row.file_name
-
         for folder in [UPLOAD_DIR, BACKUP_DIR_PDFS]:
             path = os.path.join(folder, filename)
             if os.path.exists(path):
