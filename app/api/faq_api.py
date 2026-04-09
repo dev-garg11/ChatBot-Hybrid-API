@@ -186,9 +186,9 @@ async def get_answers(query: str, db: AsyncSession):
         FROM faq_questions fq
         JOIN faq_answers fa ON fa.question_id = fq.id
         JOIN faq_documents fd ON fd.id = fq.document_id
-        WHERE fq.status = true
-        AND fa.status = true
-        AND fd.status = true
+        WHERE fq.status = 'active'
+        AND fa.status = 'active'
+        AND fd.status = 'active'
         ORDER BY fq.question_vector <=> CAST(:qv AS vector)
         LIMIT 5
     """)
