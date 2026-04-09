@@ -7,6 +7,8 @@ import re
 import uuid
 import json
 
+from pydantic import BaseModel
+
 from app.core.database import get_db
 from app.utilis.vector_service import get_vector
 from app.utilis.response import ApiResponse
@@ -30,6 +32,16 @@ def normalize_text(input_text: str) -> str:
     input_text = input_text.lower()
     input_text = re.sub(r"[^a-z0-9\s]", "", input_text)
     return input_text.strip()
+
+
+# ============================================================
+# PYDANTIC MODEL FOR UPDATE
+# ============================================================
+
+class DocumentUpdateRequest(BaseModel):
+    type_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    status: Optional[bool] = None
 
 
 # ============================================================
@@ -195,13 +207,10 @@ async def get_all_documents(db: AsyncSession = Depends(get_db)):
 @document_router.put("/update-document/{document_id}", response_model=ApiResponse)
 async def update_document(
     document_id: int,
-    type_id: Optional[int] = None,
-    is_active: Optional[bool] = None,
-    status: Optional[bool] = None,
+    body: DocumentUpdateRequest,
     db: AsyncSession = Depends(get_db)
 ):
     try:
-
         result = await db.execute(
             text("SELECT id FROM faq_documents WHERE id = :id"),
             {"id": document_id}
@@ -213,31 +222,27 @@ async def update_document(
         fields = []
         params = {"id": document_id}
 
-        if type_id is not None:
+        if body.type_id is not None:
             fields.append("type_id = :type_id")
-            params["type_id"] = type_id
+            params["type_id"] = body.type_id
 
-        if is_active is not None:
+        if body.is_active is not None:
             fields.append("is_active = :is_active")
-            params["is_active"] = is_active
+            params["is_active"] = body.is_active
 
-        if status is not None:
+        if body.status is not None:
             fields.append("status = :status")
-            params["status"] = status
+            params["status"] = body.status
 
         if not fields:
-            return ApiResponse(False, 400, "No fields provided")
+            return ApiResponse(False, 400, "No fields provided to update")
 
-        query = f"""
-        UPDATE faq_documents
-        SET {', '.join(fields)}
-        WHERE id = :id
-        """
+        query = f"UPDATE faq_documents SET {', '.join(fields)} WHERE id = :id"
 
         await db.execute(text(query), params)
         await db.commit()
 
-        return ApiResponse(True, 200, "Document updated", {"document_id": document_id})
+        return ApiResponse(True, 200, "Document updated successfully", {"document_id": document_id})
 
     except Exception as e:
         await db.rollback()

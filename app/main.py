@@ -13,9 +13,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# ----------------------------
+# Root endpoint
+# ----------------------------
+
 @app.get("/")
 async def home():
     return {"message": "ChatBot API running successfully"}
+
+# ----------------------------
+# CORS
+# ----------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,11 +34,10 @@ app.add_middleware(
 )
 
 # ----------------------------
-# Background loader
+# Background vocabulary loader
 # ----------------------------
 
 async def load_vocab():
-
     try:
         async with AsyncSessionLocal() as db:
 
@@ -54,18 +61,22 @@ async def load_vocab():
             print("✅ Vocabulary cache loaded")
 
     except Exception as e:
-
-        print(f"⚠️ Startup warning: {e}")
+        print(f"⚠️ Vocabulary load warning: {e}")
 
 # ----------------------------
-# Startup
+# Startup event
 # ----------------------------
 
 @app.on_event("startup")
 async def startup_event():
+    try:
+        asyncio.create_task(load_vocab())
+        print("🚀 Background vocabulary loader started")
+    except Exception as e:
+        print(f"⚠️ Startup error: {e}")
 
-    asyncio.create_task(load_vocab())
-
+# ----------------------------
+# Routers
 # ----------------------------
 
 app.include_router(router)
