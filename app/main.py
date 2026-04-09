@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -12,16 +13,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ----------------------------
-# Root Route
-# ----------------------------
 @app.get("/")
 async def home():
     return {"message": "ChatBot API running successfully"}
 
-# ----------------------------
-# CORS
-# ----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,12 +26,14 @@ app.add_middleware(
 )
 
 # ----------------------------
-# Startup Event
+# Background loader
 # ----------------------------
-@app.on_event("startup")
-async def load_resources():
+
+async def load_vocab():
+
     try:
         async with AsyncSessionLocal() as db:
+
             result = await db.execute(
                 text("SELECT question_text FROM faq_questions")
             )
@@ -50,20 +47,25 @@ async def load_resources():
 
             vocab = list(set(vocab))
 
-            # vocabulary cache
             VOCAB_CACHE.extend(vocab)
 
-            # spell dictionary
             load_dictionary(vocab)
 
             print("✅ Vocabulary cache loaded")
-            print("✅ Spell dictionary loaded")
 
     except Exception as e:
+
         print(f"⚠️ Startup warning: {e}")
-        print("⚠️ App will still start without vocabulary cache")
 
 # ----------------------------
-# Router
+# Startup
 # ----------------------------
+
+@app.on_event("startup")
+async def startup_event():
+
+    asyncio.create_task(load_vocab())
+
+# ----------------------------
+
 app.include_router(router)
