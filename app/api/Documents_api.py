@@ -23,9 +23,15 @@ document_router = APIRouter(prefix="/faq", tags=["Document"])
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads")
 BACKUP_DIR_PDFS = os.getenv("PDF_FOLDER", "/tmp/pdfs")
 SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8000")
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
+try:
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
+except PermissionError:
+    print(f"⚠️ Cannot create {BACKUP_DIR_PDFS}, using /tmp instead")
+    UPLOAD_DIR = "/tmp/uploads"
+    BACKUP_DIR_PDFS = "/tmp/pdfs"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR_PDFS, exist_ok=True)
 
 def normalize_text(input_text: str) -> str:
     input_text = input_text.lower()
