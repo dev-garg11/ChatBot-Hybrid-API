@@ -1,217 +1,593 @@
-from fastapi import APIRouter, Depends, Query, Body
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from sqlalchemy.exc import IntegrityError
-from datetime import datetime
+from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from sqlalchemy import text
+import logging
+import re
 
-from app.core.database import get_db
+from app.core.database import NeonHTTPSession, get_db
 from app.dtos.TypeMaster.request_dto import TypeMasterRequestDto
-from app.entites.type_master_entitie import TypeMaster
 from app.utilis.response import ApiResponse
 
-router = APIRouter(prefix="/typemaster", tags=["TypeMaster"])
+router = APIRouter(
+    prefix="/types",
+    tags=["TypeMaster"]
+)
+
+logger = logging.getLogger(__name__)
 
 
-# -------------------------------
-# CREATE TYPE MASTER
-# -------------------------------
-@router.post("", response_model=ApiResponse, summary="Add Type Master")
+# ============================================================
+# NORMALIZE
+# ============================================================
+
+def normalize_text(text_value: str) -> str:
+
+    if not text_value:
+        return ""
+
+    text_value = text_value.lower().strip()
+
+    text_value = re.sub(
+        r"[^a-z0-9\s]",
+        "",
+        text_value
+    )
+
+    text_value = re.sub(
+        r"\s+",
+        " ",
+        text_value
+    )
+
+    return text_value
+
+
+# ============================================================
+# CREATE
+# ============================================================
+
+@router.post("", response_model=ApiResponse)
 async def add_type_master(
     request: TypeMasterRequestDto,
-    db: AsyncSession = Depends(get_db)
+    db: NeonHTTPSession = Depends(get_db)
 ):
-    try:
-        # Duplicate check
-        result = await db.execute(
-            select(TypeMaster).where(TypeMaster.type_name == request.type_name)
-        )
-        existing_type = result.scalar_one_or_none()
 
-        if existing_type:
+    try:
+
+        original_name = request.type_name.strip()
+
+        normalized_name = normalize_text(original_name)
+
+        if not normalized_name:
+
             return ApiResponse(
-                success=False, status_code=400,
-                message=f"TypeMaster '{request.type_name}' already exists",
-                data=None
+                False, 400,
+                "Type name cannot be empty"
             )
 
-        new_type = TypeMaster(
-            type_name   = request.type_name,
-            description = request.description,
-            created_at  = datetime.utcnow(),
-            updated_at  = None,
-            is_active   = True
+        # DUPLICATE CHECK
+        duplicate = await db.execute(
+            text("""
+                SELECT 1
+                FROM type_master
+                WHERE LOWER(
+                    REGEXP_REPLACE(
+                        TRIM(type_name),
+                        '[^a-zA-Z0-9\\s]',
+                        '',
+                        'g'
+                    )
+                ) = :name
+                AND is_active = true
+            """),
+            {"name": normalized_name}
         )
 
-        db.add(new_type)
-        await db.commit()
-        await db.refresh(new_type)
+        if duplicate.scalar():
 
-        return ApiResponse(
-            success=True, status_code=201,
-            message="TypeMaster created successfully",
-            data={
-                "id":          new_type.type_master_id,
-                "type_name":   new_type.type_name,
-                "description": new_type.description,
-                "is_active":   new_type.is_active
+            return ApiResponse(
+                False, 400,
+                "Type already exists"
+            )
+
+        # INSERT
+        result = await db.execute(
+            text("""
+                INSERT INTO type_master
+                (
+                    type_name,
+                    description,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES
+                (
+                    :name,
+                    :description,
+                    true,
+                    NOW(),
+                    NOW()
+                )
+                RETURNING
+                    type_master_id,
+                    type_name,
+                    description,
+                    is_active,
+                    created_at,
+                    updated_at
+            """),
+            {
+                "name": original_name,
+                "description": request.description
             }
         )
 
-    except IntegrityError:
-        await db.rollback()
-        return ApiResponse(success=False, status_code=400, message="Duplicate type name", data=None)
-    except Exception as e:
-        await db.rollback()
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
+        await db.commit()
 
-
-# -------------------------------
-# GET ALL TYPES
-# -------------------------------
-@router.get("", response_model=ApiResponse, summary="Get All Type Masters")
-async def get_all_types(
-    search:    Optional[str]  = Query(None, description="Search by type name"),
-    is_active: Optional[bool] = Query(None, description="Filter by active status"),
-    page:      int            = Query(1,  ge=1),
-    limit:     int            = Query(10, ge=1),
-    db: AsyncSession = Depends(get_db)
-):
-    try:
-        query = select(TypeMaster)
-
-        if search:
-            query = query.where(TypeMaster.type_name.ilike(f"%{search}%"))
-        if is_active is not None:
-            query = query.where(TypeMaster.is_active == is_active)
-
-        offset = (page - 1) * limit
-        query  = query.offset(offset).limit(limit)
-
-        result = await db.execute(query)
-        types  = result.scalars().all()
-
-        # Total count
-        total_query = select(func.count(TypeMaster.type_master_id))
-        if search:
-            total_query = total_query.where(TypeMaster.type_name.ilike(f"%{search}%"))
-        if is_active is not None:
-            total_query = total_query.where(TypeMaster.is_active == is_active)
-        total_result = await db.execute(total_query)
-        total_items  = total_result.scalar()
+        row = result.fetchone()
 
         return ApiResponse(
-            success=True, status_code=200,
-            message="TypeMaster list fetched successfully",
-            data={
+            True, 201,
+            "Created successfully",
+            {
+                "type_master_id":   row.type_master_id,
+                "type_id":          row.type_master_id,
+                "type_name":        row.type_name,
+                "description":      row.description,
+                "is_active":        row.is_active,
+                "total_documents":  0,
+                "total_questions":  0,
+                "created_at":       str(row.created_at),
+                "updated_at":       str(row.updated_at)
+            }
+        )
+
+    except Exception as e:
+
+        await db.rollback()
+
+        logger.exception(f"Add TypeMaster failed: {str(e)}")
+
+        return ApiResponse(False, 500, "Internal server error")
+
+
+# ============================================================
+# GET BY ID
+# ============================================================
+
+@router.get("/{type_id}", response_model=ApiResponse)
+async def get_type_by_id(
+    type_id: int,
+    db: NeonHTTPSession = Depends(get_db)
+):
+
+    try:
+
+        result = await db.execute(
+            text("""
+                SELECT
+                    t.type_master_id,
+                    t.type_name,
+                    t.description,
+                    t.is_active,
+                    t.created_at,
+                    t.updated_at,
+
+                    COUNT(DISTINCT d.id)
+                        FILTER (WHERE d.status = true)
+                        AS total_documents,
+
+                    COUNT(DISTINCT q.id)
+                        FILTER (WHERE q.status = true)
+                        AS total_questions
+
+                FROM type_master t
+
+                LEFT JOIN faq_documents d
+                ON d.type_id = t.type_master_id
+
+                LEFT JOIN faq_questions q
+                ON q.type_master_id = t.type_master_id
+
+                WHERE t.type_master_id = :id
+                AND t.is_active = true
+
+                GROUP BY
+                    t.type_master_id,
+                    t.type_name,
+                    t.description,
+                    t.is_active,
+                    t.created_at,
+                    t.updated_at
+            """),
+            {"id": type_id}
+        )
+
+        row = result.fetchone()
+
+        if not row:
+
+            return ApiResponse(
+                False, 404,
+                "Type not found"
+            )
+
+        return ApiResponse(
+            True, 200,
+            "Fetched successfully",
+            {
+                "type_master_id":  row.type_master_id,
+                "type_id":         row.type_master_id,
+                "type_name":       row.type_name,
+                "description":     row.description,
+                "is_active":       row.is_active,
+                "total_documents": row.total_documents or 0,
+                "total_questions": row.total_questions or 0,
+                "created_at":      str(row.created_at),
+                "updated_at":      str(row.updated_at)
+            }
+        )
+
+    except Exception as e:
+
+        logger.exception(f"Get TypeMaster by ID failed: {str(e)}")
+
+        return ApiResponse(False, 500, "Internal server error")
+
+
+# ============================================================
+# GET ALL
+# ============================================================
+
+@router.get("", response_model=ApiResponse)
+async def get_all_types(
+    search: Optional[str] = Query(None),
+    is_active: Optional[bool] = Query(True),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    db: NeonHTTPSession = Depends(get_db)
+):
+
+    try:
+
+        conditions = []
+        params = {}
+
+        if is_active is not None:
+
+            conditions.append("t.is_active = :is_active")
+            params["is_active"] = is_active
+
+        if search:
+
+            conditions.append("t.type_name ILIKE :search")
+            params["search"] = f"%{search.strip()}%"
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions else ""
+        )
+
+        offset = (page - 1) * limit
+
+        params["limit"] = limit
+        params["offset"] = offset
+
+        # COUNT
+        count_result = await db.execute(
+            text(f"""
+                SELECT COUNT(*)
+                FROM type_master t
+                {where_clause}
+            """),
+            params
+        )
+
+        total_items = count_result.scalar() or 0
+
+        total_pages = (
+            total_items + limit - 1
+        ) // limit
+
+        if total_items > 0 and page > total_pages:
+
+            return ApiResponse(
+                False, 400,
+                "Invalid page number"
+            )
+
+        # FETCH WITH COUNTS
+        result = await db.execute(
+            text(f"""
+                SELECT
+                    t.type_master_id,
+                    t.type_name,
+                    t.description,
+                    t.is_active,
+                    t.created_at,
+                    t.updated_at,
+
+                    COUNT(DISTINCT d.id)
+                        FILTER (WHERE d.status = true)
+                        AS total_documents,
+
+                    COUNT(DISTINCT q.id)
+                        FILTER (WHERE q.status = true)
+                        AS total_questions
+
+                FROM type_master t
+
+                LEFT JOIN faq_documents d
+                ON d.type_id = t.type_master_id
+
+                LEFT JOIN faq_questions q
+                ON q.type_master_id = t.type_master_id
+
+                {where_clause}
+
+                GROUP BY
+                    t.type_master_id,
+                    t.type_name,
+                    t.description,
+                    t.is_active,
+                    t.created_at,
+                    t.updated_at
+
+                ORDER BY t.updated_at DESC NULLS LAST
+
+                LIMIT :limit
+                OFFSET :offset
+            """),
+            params
+        )
+
+        rows = result.fetchall()
+
+        return ApiResponse(
+            True, 200,
+            "Fetched successfully",
+            {
                 "items": [
                     {
-                        "id":          t.type_master_id,
-                        "type_name":   t.type_name,
-                        "description": t.description,
-                        "is_active":   t.is_active
+                        "type_master_id":  row.type_master_id,
+                        "type_id":         row.type_master_id,
+                        "type_name":       row.type_name,
+                        "description":     row.description,
+                        "is_active":       row.is_active,
+                        "total_documents": row.total_documents or 0,
+                        "total_questions": row.total_questions or 0,
+                        "created_at":      str(row.created_at),
+                        "updated_at":      str(row.updated_at)
                     }
-                    for t in types
+                    for row in rows
                 ],
                 "page":        page,
                 "limit":       limit,
-                "total_items": total_items
+                "total_items": total_items,
+                "total_pages": total_pages
             }
         )
+
     except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
+
+        logger.exception(f"Get all TypeMaster failed: {str(e)}")
+
+        return ApiResponse(False, 500, "Internal server error")
 
 
-# -------------------------------
-# GET TYPE BY ID
-# -------------------------------
-@router.get("/{type_id}", response_model=ApiResponse, summary="Get Type Master by ID")
-async def get_type_by_id(type_id: int, db: AsyncSession = Depends(get_db)):
-    try:
-        result = await db.execute(
-            select(TypeMaster).where(TypeMaster.type_master_id == type_id)
-        )
-        type_data = result.scalar_one_or_none()
+# ============================================================
+# UPDATE
+# ============================================================
 
-        if not type_data:
-            return ApiResponse(success=False, status_code=404, message="TypeMaster not found", data=None)
-
-        return ApiResponse(
-            success=True, status_code=200,
-            message="TypeMaster fetched successfully",
-            data={
-                "id":          type_data.type_master_id,
-                "type_name":   type_data.type_name,
-                "description": type_data.description,
-                "is_active":   type_data.is_active
-            }
-        )
-    except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
-
-
-# -------------------------------
-# UPDATE TYPE
-# -------------------------------
-@router.put("/{type_id}", response_model=ApiResponse, summary="Update Type Master")
+@router.put("/{type_id}", response_model=ApiResponse)
 async def update_type_master(
     type_id: int,
     request: TypeMasterRequestDto,
-    db: AsyncSession = Depends(get_db)
+    db: NeonHTTPSession = Depends(get_db)
 ):
+
     try:
-        result = await db.execute(
-            select(TypeMaster).where(TypeMaster.type_master_id == type_id)
+
+        original_name = request.type_name.strip()
+
+        normalized_name = normalize_text(original_name)
+
+        if not normalized_name:
+
+            return ApiResponse(
+                False, 400,
+                "Type name cannot be empty"
+            )
+
+        # EXIST CHECK
+        existing = await db.execute(
+            text("""
+                SELECT 1
+                FROM type_master
+                WHERE type_master_id = :id
+                AND is_active = true
+            """),
+            {"id": type_id}
         )
-        type_data = result.scalar_one_or_none()
 
-        if not type_data:
-            return ApiResponse(success=False, status_code=404, message="TypeMaster not found", data=None)
+        if not existing.scalar():
 
-        type_data.type_name   = request.type_name
-        type_data.description = request.description
-        type_data.updated_at  = datetime.utcnow()
+            return ApiResponse(
+                False, 404,
+                "Type not found"
+            )
 
-        await db.commit()
-        await db.refresh(type_data)
-
-        return ApiResponse(
-            success=True, status_code=200,
-            message="TypeMaster updated successfully",
-            data={
-                "id":          type_data.type_master_id,
-                "type_name":   type_data.type_name,
-                "description": type_data.description,
-                "is_active":   type_data.is_active
+        # DUPLICATE CHECK
+        duplicate = await db.execute(
+            text("""
+                SELECT 1
+                FROM type_master
+                WHERE LOWER(
+                    REGEXP_REPLACE(
+                        TRIM(type_name),
+                        '[^a-zA-Z0-9\\s]',
+                        '',
+                        'g'
+                    )
+                ) = :name
+                AND type_master_id != :id
+                AND is_active = true
+            """),
+            {
+                "name": normalized_name,
+                "id": type_id
             }
         )
-    except Exception as e:
-        await db.rollback()
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
 
+        if duplicate.scalar():
 
-# -------------------------------
-# DELETE TYPE
-# -------------------------------
-@router.delete("/{type_id}", response_model=ApiResponse, summary="Delete Type Master")
-async def delete_type_master(type_id: int, db: AsyncSession = Depends(get_db)):
-    try:
+            return ApiResponse(
+                False, 400,
+                "Type already exists"
+            )
+
+        # UPDATE
         result = await db.execute(
-            select(TypeMaster).where(TypeMaster.type_master_id == type_id)
+            text("""
+                UPDATE type_master
+                SET
+                    type_name   = :name,
+                    description = :description,
+                    updated_at  = NOW()
+                WHERE type_master_id = :id
+                RETURNING
+                    type_master_id,
+                    type_name,
+                    description,
+                    is_active,
+                    created_at,
+                    updated_at
+            """),
+            {
+                "name":        original_name,
+                "description": request.description,
+                "id":          type_id
+            }
         )
-        type_data = result.scalar_one_or_none()
 
-        if not type_data:
-            return ApiResponse(success=False, status_code=404, message="TypeMaster not found", data=None)
+        await db.commit()
 
-        await db.delete(type_data)
+        row = result.fetchone()
+
+        if not row:
+
+            return ApiResponse(
+                False, 404,
+                "Type not found"
+            )
+
+        return ApiResponse(
+            True, 200,
+            "Updated successfully",
+            {
+                "type_master_id": row.type_master_id,
+                "type_id":        row.type_master_id,
+                "type_name":      row.type_name,
+                "description":    row.description,
+                "is_active":      row.is_active,
+                "created_at":     str(row.created_at),
+                "updated_at":     str(row.updated_at)
+            }
+        )
+
+    except Exception as e:
+
+        await db.rollback()
+
+        logger.exception(f"Update TypeMaster failed: {str(e)}")
+
+        return ApiResponse(False, 500, "Internal server error")
+
+
+# ============================================================
+# DELETE (SOFT DELETE)
+# ============================================================
+
+@router.delete("/{type_id}", response_model=ApiResponse)
+async def delete_type_master(
+    type_id: int,
+    db: NeonHTTPSession = Depends(get_db)
+):
+
+    try:
+
+        existing = await db.execute(
+            text("""
+                SELECT is_active
+                FROM type_master
+                WHERE type_master_id = :id
+            """),
+            {"id": type_id}
+        )
+
+        row = existing.fetchone()
+
+        if not row:
+
+            return ApiResponse(
+                False, 404,
+                "Type not found"
+            )
+
+        if not row.is_active:
+
+            return ApiResponse(
+                False, 400,
+                "Type already deleted"
+            )
+
+        # DEPENDENCY CHECK
+        dependency = await db.execute(
+            text("""
+                SELECT 1
+                FROM faq_documents
+                WHERE type_id = :id
+                AND status = true
+                LIMIT 1
+            """),
+            {"id": type_id}
+        )
+
+        if dependency.scalar():
+
+            return ApiResponse(
+                False, 400,
+                "Cannot delete type because documents are using it"
+            )
+
+        # SOFT DELETE
+        await db.execute(
+            text("""
+                UPDATE type_master
+                SET
+                    is_active  = false,
+                    updated_at = NOW()
+                WHERE type_master_id = :id
+            """),
+            {"id": type_id}
+        )
+
         await db.commit()
 
         return ApiResponse(
-            success=True, status_code=200,
-            message="TypeMaster deleted successfully",
-            data={"deleted_id": type_id}
+            True, 200,
+            "Deleted successfully",
+            {
+                "type_master_id": type_id,
+                "type_id":        type_id
+            }
         )
+
     except Exception as e:
+
         await db.rollback()
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
+
+        logger.exception(f"Delete TypeMaster failed: {str(e)}")
+
+        return ApiResponse(False, 500, "Internal server error")

@@ -12,17 +12,11 @@ OLLAMA_TIMEOUT = 120
 IMAGE_SAVE_DIR = "app/data/extracted_images"
 
 
-# ─── FAQ wala existing code ───
-
 # ============================================================
 # FORMAT DETECTION
 # ============================================================
 
 def has_qa_format(text: str) -> bool:
-    """
-    Check karo ki PDF mein 1.1, 1.2 Q&A format hai ya nahi.
-    Agar 5+ numbered questions milein to Q&A format hai.
-    """
     matches = re.findall(r'\n\d+\.\d+\s+\w', text)
     return len(matches) >= 5
 
@@ -32,11 +26,6 @@ def has_qa_format(text: str) -> bool:
 # ============================================================
 
 def parse_chunks(doc, chunk_size: int = 3) -> List[Dict]:
-    """
-    Manual PDFs ke liye — har chunk_size pages ka ek Q&A pair banao.
-    Question = page heading ya pehli line
-    Answer = us chunk ka poora text
-    """
     qa_pairs = []
     total = len(doc)
     pages = list(range(0, total))
@@ -86,7 +75,7 @@ def parse_chunks(doc, chunk_size: int = 3) -> List[Dict]:
 
 
 # ============================================================
-# MAIN EXTRACT FUNCTION
+# MAIN EXTRACT FUNCTION — FIXED
 # ============================================================
 
 def extract_faq_from_pdf(file_path: str) -> List[Dict]:
@@ -100,26 +89,19 @@ def extract_faq_from_pdf(file_path: str) -> List[Dict]:
     for page in doc:
         full_text += page.get_text()
 
-    doc.close()
-
-    print("=== Extracted Text (first 500 chars) ===")
-    print(full_text[:500])
-    return parse_qa(full_text)
-
     print("=== Extracted Text (first 500 chars) ===")
     print(full_text[:500])
 
     # Format detect karo
     if has_qa_format(full_text):
-        print(f"\n[FORMAT] Q&A format detected (1.1, 1.2...) -> parse_qa()")
+        print("[FORMAT] Q&A format detected (1.1, 1.2...) -> parse_qa()")
         doc.close()
         return parse_qa(full_text)
     else:
-        print(f"\n[FORMAT] Manual/Doc format detected -> parse_chunks()")
+        print("[FORMAT] Manual/Doc format detected -> parse_chunks()")
         result = parse_chunks(doc, chunk_size=3)
         doc.close()
         return result
-
 
 
 # ============================================================
@@ -129,14 +111,10 @@ def extract_faq_from_pdf(file_path: str) -> List[Dict]:
 def parse_qa(text: str) -> List[Dict]:
     qa_pairs = []
 
-    pattern = re.split(r'\n(?=\d+\.\d+\s)', text.strip())
-
-
     pattern = re.split(
         r'\n(?=\d+\.\d+\s)',
         text.strip()
     )
-
 
     for block in pattern:
         block = block.strip()
@@ -163,18 +141,18 @@ def parse_qa(text: str) -> List[Dict]:
 
 
 # ============================================================
-# ORIGINAL clean function
+# CLEAN FUNCTION
 # ============================================================
 
 def clean(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-# ─── PDF wala new code ───
+# ============================================================
+# IMAGE EXTRACTOR
+# ============================================================
 
 def extract_images_from_page(doc, page_num: int, document_id: int) -> List[str]:
-    """Ek page se images extract karke save karta hai"""
-
     os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
     page = doc[page_num]
@@ -188,7 +166,6 @@ def extract_images_from_page(doc, page_num: int, document_id: int) -> List[str]:
             image_bytes = base_image["image"]
             image_ext = base_image["ext"]
 
-            # 5KB se chote skip (logos/icons)
             if len(image_bytes) < 5000:
                 continue
 
@@ -208,9 +185,11 @@ def extract_images_from_page(doc, page_num: int, document_id: int) -> List[str]:
     return saved_paths
 
 
-def extract_qa_from_chunk(chunk: str) -> List[Dict]:
-    """Ollama se Q&A extract karta hai"""
+# ============================================================
+# OLLAMA Q&A EXTRACTOR
+# ============================================================
 
+def extract_qa_from_chunk(chunk: str) -> List[Dict]:
     prompt = f"""Extract question-answer pairs from the following document text.
 
 Return a JSON array where each item has "question" and "answer" keys.
@@ -267,15 +246,11 @@ OUTPUT:
         return []
 
 
-def extract_pdf_qa(file_path: str, document_id: int = 0) -> List[Dict]:
-    """
-    Main function:
-    - Page by page text extract karo
-    - Har page ka chunk banao → Q&A extract karo
-    - Same page ki images us Q&A ke saath link karo
-    Returns: [{"question": "...", "answer": "...", "image_paths": [...]}, ...]
-    """
+# ============================================================
+# FULL PDF Q&A EXTRACTOR (Ollama + Images)
+# ============================================================
 
+def extract_pdf_qa(file_path: str, document_id: int = 0) -> List[Dict]:
     print(f"📄 Reading PDF: {file_path}")
     os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)
 
@@ -288,25 +263,22 @@ def extract_pdf_qa(file_path: str, document_id: int = 0) -> List[Dict]:
     for page_num in range(total_pages):
         page = doc[page_num]
         page_text = page.get_text()
-        page_text = " ".join(page_text.split())  # clean
+        page_text = " ".join(page_text.split())
 
         print(f"\n  📄 Page {page_num + 1}/{total_pages}")
 
-        # Page ki images extract karo
         page_images = extract_images_from_page(doc, page_num, document_id)
 
         if not page_text.strip():
             print(f"  ⚠️ Empty page — skipping")
             continue
 
-        # Page text se Q&A extract karo
         print(f"  🤖 Extracting Q&A...")
         qa_pairs = extract_qa_from_chunk(page_text)
         print(f"  ✅ Q&A found: {len(qa_pairs)}")
 
-        # Har Q&A ke saath same page ki images link karo
         for qa in qa_pairs:
-            qa["image_paths"] = page_images  # ✅ Link
+            qa["image_paths"] = page_images
 
         all_qa.extend(qa_pairs)
 

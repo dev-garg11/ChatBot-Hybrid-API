@@ -1,100 +1,592 @@
-from fastapi import APIRouter, Depends, Body
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text, select
-from typing import Optional
+from fastapi import APIRouter, Depends, Body, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional, Any
+from sqlalchemy import text
 import re
-import json
+import asyncio
+import logging
 
-from app.core.database import get_db
+from app.core.database import NeonHTTPSession, get_db
 from app.utilis.vector_service import get_vector
-from app.utilis.response import ApiResponse
-from app.entites.faq_entities import FaqQuestion
 
-# ----------------------------
-# ROUTER
-# ----------------------------
-question_router = APIRouter(prefix="/faq", tags=["Question"])
+question_router = APIRouter(
+    prefix="/questions",
+    tags=["Questions"]
+)
+
+logger = logging.getLogger(__name__)
 
 
-# ----------------------------
-# HELPER
-# ----------------------------
-def normalize_text(input_text: str) -> str:
-    input_text = input_text.lower()
-    input_text = re.sub(r"[^a-z0-9\s]", "", input_text)
-    return input_text.strip()
+# ============================================================
+# RESPONSE MODEL
+# ============================================================
 
+class StandardResponse(BaseModel):
+    success: bool
+    status_code: int
+    message: str
+    data: Optional[Any] = None
+
+
+# ============================================================
+# RESPONSE HELPERS
+# ============================================================
+
+def error_response(
+    status_code: int,
+    message: str
+) -> JSONResponse:
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "status_code": status_code,
+            "message": message,
+            "data": None
+        }
+    )
+
+
+def success_response(
+    message: str,
+    data: Any = None,
+    status_code: int = 200
+) -> JSONResponse:
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": True,
+            "status_code": status_code,
+            "message": message,
+            "data": data
+        }
+    )
+
+
+# ============================================================
+# NORMALIZE TEXT
+# ============================================================
+
+def normalize_text(text_input: str) -> str:
+
+    text_input = text_input.lower()
+
+    text_input = re.sub(
+        r"[^a-z0-9]",
+        "",
+        text_input
+    )
+
+    return text_input.strip()
+
+
+# ============================================================
+# SAFE VECTOR
+# ============================================================
+
+async def safe_vector(
+    txt: str,
+    retries: int = 3
+) -> Optional[list]:
+
+    for attempt in range(retries):
+
+        try:
+
+            vec = await asyncio.wait_for(
+                asyncio.to_thread(get_vector, txt),
+                timeout=10
+            )
+
+            if vec and len(vec) > 0:
+                return vec
+
+        except asyncio.TimeoutError:
+
+            logger.warning(
+                f"Vector timeout {attempt + 1}/{retries}"
+            )
+
+        except Exception as e:
+
+            logger.error(
+                f"Vector error: {str(e)}"
+            )
+
+    return None
+
+
+# ============================================================
+# AUTO DOCUMENT MATCH
+# ============================================================
+
+DOCUMENT_SIMILARITY_THRESHOLD = 0.75
+
+
+async def auto_find_document(
+    vector: list,
+    db: NeonHTTPSession
+) -> Optional[int]:
+
+    try:
+
+        vector_str = (
+            "[" + ",".join(
+                f"{x:.6f}" for x in vector
+            ) + "]"
+        )
+
+        result = await db.execute(
+            text("""
+                SELECT
+                    id,
+                    file_name,
+                    1 - (
+                        document_vector <=> CAST(:vec AS vector)
+                    ) AS similarity
+
+                FROM faq_documents
+
+                WHERE status = true
+                AND document_vector IS NOT NULL
+
+                ORDER BY
+                    document_vector <=> CAST(:vec AS vector)
+
+                LIMIT 1
+            """),
+            {"vec": vector_str}
+        )
+
+        row = result.fetchone()
+
+        if not row:
+            return None
+
+        similarity = float(
+            row.similarity or 0.0
+        )
+
+        logger.info(
+            f"AUTO DOC MATCH -> "
+            f"id={row.id} "
+            f"similarity={similarity}"
+        )
+
+        if similarity >= DOCUMENT_SIMILARITY_THRESHOLD:
+            return row.id
+
+        return None
+
+    except Exception as e:
+
+        logger.error(
+            f"Auto document error: {str(e)}"
+        )
+
+        return None
+
+
+# ============================================================
+# FETCH QUESTION + ANSWERS
+# ============================================================
+# ============================================================
+# FETCH QUESTION + ANSWERS
+# ============================================================
+
+async def fetch_question_with_answers(
+    question_id: int,
+    db: NeonHTTPSession
+) -> Optional[dict]:
+
+    result = await db.execute(
+        text("""
+            SELECT
+                q.id,
+                q.question_text,
+                q.type_master_id,
+                q.document_id,
+                q.status,
+                q.created_at,
+                q.updated_at,
+
+                tm.type_name,
+
+                d.file_name AS document_name
+
+            FROM faq_questions q
+
+            LEFT JOIN type_master tm
+            ON tm.type_master_id = q.type_master_id
+
+            LEFT JOIN faq_documents d
+            ON d.id = q.document_id
+
+            WHERE q.id = :id
+            AND q.status = true
+        """),
+        {"id": question_id}
+    )
+
+    row = result.fetchone()
+
+    if not row:
+        return None
+
+    # ============================================================
+    # FETCH ANSWER IDS ONLY
+    # ============================================================
+
+    answers_result = await db.execute(
+        text("""
+            SELECT
+                id AS answer_id
+
+            FROM faq_answers
+
+            WHERE question_id = :qid
+            AND status = true
+
+            ORDER BY id ASC
+        """),
+        {"qid": question_id}
+    )
+
+    answers = answers_result.fetchall()
+
+    return {
+        "question_id": str(row.id),
+
+        "question": row.question_text,
+
+        "type_master_id": (
+            str(row.type_master_id)
+            if row.type_master_id else None
+        ),
+
+        "type_name": row.type_name,
+
+        "document_id": (
+            str(row.document_id)
+            if row.document_id else None
+        ),
+
+        "document_name": row.document_name,
+
+        # ONLY ANSWER IDS
+        "answer_ids": [
+            str(ans.answer_id)
+            for ans in answers
+        ],
+
+        "status": row.status,
+
+        "created_at": (
+            str(row.created_at)
+            if row.created_at else None
+        ),
+
+        "updated_at": (
+            str(row.updated_at)
+            if row.updated_at else None
+        )
+    }
 
 # ============================================================
 # ADD QUESTION
 # ============================================================
 
-@question_router.post("/add-question", response_model=ApiResponse, summary="Add Question Only")
-async def add_question_only(
-    question: str = Body(..., embed=True),
-    type_id: int = Body(..., embed=True),
-    document_id: Optional[int] = Body(None, embed=True),
-    db: AsyncSession = Depends(get_db)
+@question_router.post(
+    "/add-question",
+    response_model=StandardResponse,
+    status_code=201
+)
+async def add_question(
+    question: str = Body(
+        ...,
+        embed=True,
+        min_length=3,
+        max_length=500
+    ),
+
+    type_id: int = Body(
+        ...,
+        embed=True
+    ),
+
+    db: NeonHTTPSession = Depends(get_db)
 ):
+
     try:
 
-        clean_question = normalize_text(question)
+        question = question.strip()
 
-        if not clean_question:
-            return ApiResponse(
-                success=False,
-                status_code=400,
-                message="Question cannot be empty"
+        norm = normalize_text(question)
+
+        if not norm:
+
+            return error_response(
+                400,
+                "Question cannot be empty"
             )
 
-        # Duplicate check
-        existing = await db.execute(
-            select(FaqQuestion).where(FaqQuestion.question_text.ilike(clean_question))
+        # ============================================================
+        # TYPE VALIDATION
+        # ============================================================
+
+        type_check = await db.execute(
+            text("""
+                SELECT 1
+                FROM type_master
+                WHERE type_master_id = :tid
+                AND is_active = true
+            """),
+            {"tid": type_id}
         )
 
-        if existing.scalar_one_or_none():
-            return ApiResponse(
-                success=False,
-                status_code=400,
-                message="Question already exists"
+        if not type_check.scalar():
+
+            return error_response(
+                400,
+                f"Invalid type_id: {type_id}"
             )
 
-        vector = get_vector(clean_question)
-        safe_document_id = document_id if document_id and document_id > 0 else None
+        # ============================================================
+        # DUPLICATE CHECK
+        # ============================================================
 
-        result = await db.execute(text("""
-            INSERT INTO faq_questions
-            (document_id, type_master_id, question_text, question_vector, status)
-            VALUES (:doc, :type, :question, :vector, true)
-            RETURNING id
-        """), {
-            "doc": safe_document_id,
-            "type": type_id,
-            "question": clean_question,
-            "vector": json.dumps(vector)
-        })
+        dup = await db.execute(
+            text("""
+                SELECT id
+                FROM faq_questions
 
-        question_id = result.scalar()
-        await db.commit()
+                WHERE REGEXP_REPLACE(
+                    LOWER(question_text),
+                    '[^a-z0-9]',
+                    '',
+                    'g'
+                ) = :norm
 
-        return ApiResponse(
-            success=True,
-            status_code=201,
-            message="Question added successfully",
-            data={
-                "question_id": question_id,
-                "document_id": safe_document_id,
-                "type_id": type_id,
-                "question": clean_question
+                AND status = true
+
+                LIMIT 1
+            """),
+            {"norm": norm}
+        )
+
+        dup_row = dup.fetchone()
+
+        if dup_row:
+
+            existing_data = await fetch_question_with_answers(
+                dup_row.id,
+                db
+            )
+
+            return success_response(
+                "Question already exists",
+                existing_data,
+                200
+            )
+
+        # ============================================================
+        # VECTOR
+        # ============================================================
+
+        vector = await safe_vector(question)
+
+        vector_str = None
+
+        if vector:
+
+            vector_str = (
+                "[" + ",".join(
+                    f"{x:.6f}" for x in vector
+                ) + "]"
+            )
+
+        # ============================================================
+        # AUTO DOCUMENT MATCH
+        # ============================================================
+
+        document_id = None
+        document_auto_matched = False
+
+        if vector is not None:
+
+            auto_doc = await auto_find_document(
+                vector,
+                db
+            )
+
+            if auto_doc is not None:
+
+                document_id = auto_doc
+
+                document_auto_matched = True
+
+                logger.info(
+                    f"DOCUMENT AUTO MATCHED: {document_id}"
+                )
+
+        # ============================================================
+        # INSERT QUESTION
+        # ============================================================
+
+        if vector_str:
+
+            result = await db.execute(
+                text("""
+                    INSERT INTO faq_questions
+                    (
+                        question_text,
+                        type_master_id,
+                        document_id,
+                        question_vector,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES
+                    (
+                        :q,
+                        :tid,
+                        :did,
+                        CAST(:vec AS vector),
+                        true,
+                        NOW(),
+                        NOW()
+                    )
+
+                    RETURNING id
+                """),
+                {
+                    "q": question,
+                    "tid": type_id,
+                    "did": document_id,
+                    "vec": vector_str
+                }
+            )
+
+        else:
+
+            result = await db.execute(
+                text("""
+                    INSERT INTO faq_questions
+                    (
+                        question_text,
+                        type_master_id,
+                        document_id,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES
+                    (
+                        :q,
+                        :tid,
+                        :did,
+                        true,
+                        NOW(),
+                        NOW()
+                    )
+
+                    RETURNING id
+                """),
+                {
+                    "q": question,
+                    "tid": type_id,
+                    "did": document_id
+                }
+            )
+
+        row = result.fetchone()
+
+        question_id = row.id
+
+        # ============================================================
+        # AUTO ANSWER INSERT
+        # ============================================================
+
+        auto_answer = (
+            "Answer not added yet"
+        )
+
+        answer_result = await db.execute(
+            text("""
+                INSERT INTO faq_answers
+                (
+                    question_id,
+                    answer_text,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES
+                (
+                    :qid,
+                    :answer,
+                    true,
+                    NOW(),
+                    NOW()
+                )
+
+                RETURNING id
+            """),
+            {
+                "qid": question_id,
+                "answer": auto_answer
             }
         )
 
+        answer_row = answer_result.fetchone()
+
+        await db.commit()
+
+        # ============================================================
+        # FINAL RESPONSE
+        # ============================================================
+
+        final_data = await fetch_question_with_answers(
+            question_id,
+            db
+        )
+
+        if final_data:
+
+            final_data["vector_saved"] = (
+                vector_str is not None
+            )
+
+            final_data["document_auto_matched"] = (
+                document_auto_matched
+            )
+
+            final_data["auto_answer_id"] = (
+                str(answer_row.id)
+                if answer_row else None
+            )
+
+        return success_response(
+            "Question created successfully",
+            final_data,
+            201
+        )
+
     except Exception as e:
-        return ApiResponse(
-            success=False,
-            status_code=500,
-            message="Something went wrong",
-            data=str(e)
+
+        await db.rollback()
+
+        logger.exception(
+            f"ADD QUESTION ERROR: {str(e)}"
+        )
+
+        return error_response(
+            500,
+            "Internal server error"
         )
 
 
@@ -102,179 +594,297 @@ async def add_question_only(
 # GET ALL QUESTIONS
 # ============================================================
 
-@question_router.get("/questions", response_model=ApiResponse, summary="Get All Questions")
-async def get_all_questions(db: AsyncSession = Depends(get_db)):
+@question_router.get(
+    "/all",
+    response_model=StandardResponse
+)
+async def get_all_questions(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: NeonHTTPSession = Depends(get_db)
+):
+
     try:
 
-        result = await db.execute(text("""
-            SELECT id AS question_id,
-                   document_id,
-                   type_master_id AS type_id,
-                   question_text
-            FROM faq_questions
-            WHERE status = true
-            ORDER BY id DESC
-        """))
+        result = await db.execute(
+            text("""
+                SELECT
+                    id
+                FROM faq_questions
+                WHERE status = true
+                ORDER BY id DESC
+                LIMIT :limit
+                OFFSET :offset
+            """),
+            {
+                "limit": limit,
+                "offset": offset
+            }
+        )
 
         rows = result.fetchall()
 
-        if not rows:
-            return ApiResponse(success=False, status_code=404, message="No questions found")
+        items = []
 
-        questions = []
+        for row in rows:
 
-        for r in rows:
-            questions.append({
-                "question_id": r.question_id,
-                "document_id": r.document_id,
-                "type_id": r.type_id,
-                "question": r.question_text
-            })
+            data = await fetch_question_with_answers(
+                row.id,
+                db
+            )
 
-        return ApiResponse(
-            success=True,
-            status_code=200,
-            message="Questions fetched",
-            data=questions
+            if data:
+                items.append(data)
+
+        return success_response(
+            "Questions fetched successfully",
+            {
+                "items": items,
+                "count": len(items)
+            }
         )
 
     except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
+
+        logger.exception(
+            f"GET ALL ERROR: {str(e)}"
+        )
+
+        return error_response(
+            500,
+            "Internal server error"
+        )
 
 
 # ============================================================
 # GET QUESTION BY ID
 # ============================================================
 
-@question_router.get("/question/{question_id}", response_model=ApiResponse)
-async def get_question_by_id(question_id: int, db: AsyncSession = Depends(get_db)):
+@question_router.get(
+    "/{question_id}",
+    response_model=StandardResponse
+)
+async def get_question_by_id(
+    question_id: int,
+    db: NeonHTTPSession = Depends(get_db)
+):
+
     try:
 
-        result = await db.execute(text("""
-            SELECT id AS question_id,
-                   document_id,
-                   type_master_id AS type_id,
-                   question_text
-            FROM faq_questions
-            WHERE id = :qid AND status = true
-        """), {"qid": question_id})
+        data = await fetch_question_with_answers(
+            question_id,
+            db
+        )
 
-        row = result.fetchone()
+        if not data:
 
-        if not row:
-            return ApiResponse(success=False, status_code=404, message="Question not found")
+            return error_response(
+                404,
+                "Question not found"
+            )
 
-        return ApiResponse(
-            success=True,
-            status_code=200,
-            message="Question found",
-            data={
-                "question_id": row.question_id,
-                "document_id": row.document_id,
-                "type_id": row.type_id,
-                "question": row.question_text
-            }
+        return success_response(
+            "Question fetched successfully",
+            data
         )
 
     except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
+
+        logger.exception(
+            f"GET QUESTION ERROR: {str(e)}"
+        )
+
+        return error_response(
+            500,
+            "Internal server error"
+        )
 
 
 # ============================================================
 # UPDATE QUESTION
 # ============================================================
 
-@question_router.put("/update-question/{question_id}", response_model=ApiResponse)
+@question_router.put(
+    "/{question_id}",
+    response_model=StandardResponse
+)
 async def update_question(
     question_id: int,
-    question: str = Body(..., embed=True),
-    type_id: Optional[int] = Body(None, embed=True),
-    document_id: Optional[int] = Body(None, embed=True),
-    db: AsyncSession = Depends(get_db)
+
+    question: str = Body(
+        ...,
+        embed=True
+    ),
+
+    type_id: int = Body(
+        ...,
+        embed=True
+    ),
+
+    db: NeonHTTPSession = Depends(get_db)
 ):
+
     try:
 
-        result = await db.execute(
-            text("SELECT id FROM faq_questions WHERE id = :id AND status = true"),
+        exists = await db.execute(
+            text("""
+                SELECT 1
+                FROM faq_questions
+                WHERE id = :id
+                AND status = true
+            """),
             {"id": question_id}
         )
 
-        if not result.fetchone():
-            return ApiResponse(success=False, status_code=404, message="Question not found")
+        if not exists.scalar():
 
-        clean_question = normalize_text(question)
+            return error_response(
+                404,
+                "Question not found"
+            )
 
-        if not clean_question:
-            return ApiResponse(success=False, status_code=400, message="Question cannot be empty")
+        vector = await safe_vector(question)
 
-        vector = get_vector(clean_question)
-        safe_document_id = document_id if document_id and document_id > 0 else None
+        vector_str = None
 
-        await db.execute(text("""
-            UPDATE faq_questions
-            SET question_text = :question,
-                question_vector = :vector,
-                type_master_id = COALESCE(:type_id, type_master_id),
-                document_id = COALESCE(:doc_id, document_id)
-            WHERE id = :id
-        """), {
-            "question": clean_question,
-            "vector": json.dumps(vector),
-            "type_id": type_id,
-            "doc_id": safe_document_id,
-            "id": question_id
-        })
+        if vector:
+
+            vector_str = (
+                "[" + ",".join(
+                    f"{x:.6f}" for x in vector
+                ) + "]"
+            )
+
+        document_id = None
+
+        if vector:
+
+            document_id = await auto_find_document(
+                vector,
+                db
+            )
+
+        await db.execute(
+            text("""
+                UPDATE faq_questions
+                SET
+                    question_text = :q,
+                    type_master_id = :tid,
+                    document_id = :did,
+                    question_vector = CAST(:vec AS vector),
+                    updated_at = NOW()
+
+                WHERE id = :id
+            """),
+            {
+                "q": question,
+                "tid": type_id,
+                "did": document_id,
+                "vec": vector_str,
+                "id": question_id
+            }
+        )
 
         await db.commit()
 
-        return ApiResponse(
-            success=True,
-            status_code=200,
-            message="Question updated successfully",
-            data={
-                "question_id": question_id,
-                "question": clean_question
+        updated_data = await fetch_question_with_answers(
+            question_id,
+            db
+        )
+
+        return success_response(
+            "Question updated successfully",
+            updated_data
+        )
+
+    except Exception as e:
+
+        await db.rollback()
+
+        logger.exception(
+            f"UPDATE ERROR: {str(e)}"
+        )
+
+        return error_response(
+            500,
+            "Internal server error"
+        )
+
+
+# ============================================================
+# DELETE QUESTION
+# ============================================================
+
+@question_router.delete(
+    "/{question_id}",
+    response_model=StandardResponse
+)
+async def delete_question(
+    question_id: int,
+    db: NeonHTTPSession = Depends(get_db)
+):
+
+    try:
+
+        exists = await db.execute(
+            text("""
+                SELECT 1
+                FROM faq_questions
+                WHERE id = :id
+                AND status = true
+            """),
+            {"id": question_id}
+        )
+
+        if not exists.scalar():
+
+            return error_response(
+                404,
+                "Question not found"
+            )
+
+        await db.execute(
+            text("""
+                UPDATE faq_questions
+                SET
+                    status = false,
+                    updated_at = NOW()
+
+                WHERE id = :id
+            """),
+            {"id": question_id}
+        )
+
+        await db.execute(
+            text("""
+                UPDATE faq_answers
+                SET
+                    status = false,
+                    updated_at = NOW()
+
+                WHERE question_id = :id
+            """),
+            {"id": question_id}
+        )
+
+        await db.commit()
+
+        return success_response(
+            "Question deleted successfully",
+            {
+                "question_id": str(question_id)
             }
         )
 
     except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))
 
+        await db.rollback()
 
-# ============================================================
-# DELETE QUESTION (SOFT DELETE)
-# ============================================================
-
-@question_router.delete("/delete-question/{question_id}", response_model=ApiResponse)
-async def delete_question(question_id: int, db: AsyncSession = Depends(get_db)):
-    try:
-
-        result = await db.execute(
-            text("SELECT id FROM faq_questions WHERE id = :id AND status = true"),
-            {"id": question_id}
+        logger.exception(
+            f"DELETE ERROR: {str(e)}"
         )
 
-        if not result.fetchone():
-            return ApiResponse(success=False, status_code=404, message="Question not found")
-
-        await db.execute(
-            text("UPDATE faq_questions SET status = false WHERE id = :id"),
-            {"id": question_id}
+        return error_response(
+            500,
+            "Internal server error"
         )
-
-        await db.execute(
-            text("UPDATE faq_answers SET status = false WHERE question_id = :id"),
-            {"id": question_id}
-        )
-
-        await db.commit()
-
-        return ApiResponse(
-            success=True,
-            status_code=200,
-            message="Question deleted successfully",
-            data={"deleted_question_id": question_id}
-        )
-
-    except Exception as e:
-        return ApiResponse(success=False, status_code=500, message="Something went wrong", data=str(e))

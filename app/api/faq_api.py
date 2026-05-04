@@ -1,391 +1,394 @@
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from sqlalchemy import text
 import asyncio
 import re
-import time
 import logging
 import os
-from fastapi.responses import StreamingResponse
+from collections import OrderedDict
+from threading import Lock
 
-from app.core.database import get_db
+from app.core.database import NeonHTTPSession, get_db
 from app.utilis.vector_service import get_vector
 from app.utilis.response import ApiResponse
 from app.utilis.spell_service import correct_sentence
-from app.utilis.cache import VOCAB_CACHE
-from app.utilis.llm_service import generate_llm_answer
-from app.utilis.llm_stream_service import generate_llm_stream
 
-from rapidfuzz import process
 from dotenv import load_dotenv
-
 load_dotenv()
 
-# ----------------------------
-# LOGGER
-# ----------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
 logger = logging.getLogger("faq")
 
-# ----------------------------
-# CONFIG
-# ----------------------------
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", 0.65))
-TOP_N_RESULTS = int(os.getenv("TOP_N_RESULTS", 5))
-MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", 300))
+MAX_QUERY_LENGTH     = int(os.getenv("MAX_QUERY_LENGTH", 300))
 
-RESPONSE_CACHE = {}
-VECTOR_CACHE = {}
 
-# ----------------------------
-# ROUTERS
-# ----------------------------
-router = APIRouter()
+# ============================================================
+# LRU CACHE
+# ============================================================
+
+class LRUCache:
+
+    def __init__(self, max_size=100):
+        self.cache    = OrderedDict()
+        self.max_size = max_size
+        self.lock     = Lock()
+
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            return None
+
+    def set(self, key, value):
+        with self.lock:
+            self.cache[key] = value
+            self.cache.move_to_end(key)
+            if len(self.cache) > self.max_size:
+                self.cache.popitem(last=False)
+
+
+RESPONSE_CACHE = LRUCache(100)
+VECTOR_CACHE   = LRUCache(200)
+
 faq_router = APIRouter(prefix="/faq", tags=["FAQ"])
 
-# ----------------------------
-# HELPER FUNCTIONS
-# ----------------------------
+
+# ============================================================
+# HELPERS
+# ============================================================
+
 def normalize_text(text_input: str) -> str:
+
     text_input = text_input.lower()
     text_input = re.sub(r"[^a-z0-9\s]", "", text_input)
+
     return text_input.strip()
 
 
-def split_words(input_text: str, vocab: list) -> str:
-    result = []
-    for word in input_text.split():
-        if word in vocab:
-            result.append(word)
-            continue
-
-        split_found = False
-
-        for i in range(3, len(word) - 2):
-            left = word[:i]
-            right = word[i:]
-
-            if left in vocab and right in vocab:
-                result.append(left)
-                result.append(right)
-                split_found = True
-                break
-
-        if not split_found:
-            result.append(word)
-
-    return " ".join(result)
-
-
-def dynamic_word_fix(word: str, vocab: list) -> str:
-    if len(word) < 3:
-        return word
-
-    match = process.extractOne(word, vocab)
-
-    if match and match[1] > 60:
-        return match[0]
-
-    return word
-
-
-def preprocess_query(text_input: str, vocab: list) -> str:
+def preprocess_query(text_input: str) -> str:
 
     text_input = normalize_text(text_input)
 
-    text_input = correct_sentence(text_input)
-
-    text_input = split_words(text_input, vocab)
-
-    words = text_input.split()
-
-    words = [dynamic_word_fix(w, vocab) for w in words]
-
-    return " ".join(words)
-
-
-def split_query(query: str) -> list[str]:
-
-    parts = re.split(r'\band\b|[.,?&/;]', query)
-
-    questions = [p.strip() for p in parts if len(p.strip()) > 2]
-
-    return questions if questions else [query.strip()]
+    return correct_sentence(text_input)
 
 
 def vector_to_str(vector) -> str:
-    return "[" + ",".join(map(str, vector)) + "]"
+
+    try:
+        return (
+            "[" +
+            ",".join(f"{float(x):.6f}" for x in vector) +
+            "]"
+        )
+    except Exception:
+        logger.exception("Vector conversion failed")
+        return "[]"
 
 
 async def get_vector_cached(clean_query: str):
 
-    if clean_query in VECTOR_CACHE:
-        return VECTOR_CACHE[clean_query]
+    cached = VECTOR_CACHE.get(clean_query)
+
+    if cached:
+        return cached
 
     vector = await asyncio.to_thread(get_vector, clean_query)
 
-    VECTOR_CACHE[clean_query] = vector
+    VECTOR_CACHE.set(clean_query, vector)
 
     return vector
 
 
-# ----------------------------
-# CORE RETRIEVAL
-# ----------------------------
-async def process_single_query(q, db, vocab, sql):
-
-    clean_query = preprocess_query(q, vocab)
-
-    query_vector = await get_vector_cached(clean_query)
-
-    result = await db.execute(sql, {"qv": vector_to_str(query_vector)})
-
-    rows = result.fetchall()
-
-    temp_answers = []
-
-    for row in rows:
-
-        similarity = float(row.similarity)
-
-        if similarity < SIMILARITY_THRESHOLD:
-            continue
-
-        query_words = set(clean_query.split())
-
-        question_words = set(row.question_text.lower().split())
-
-        keyword_score = len(query_words & question_words) / max(len(query_words), 1)
-
-        temp_answers.append({
-            "question": row.question_text,
-            "answer": row.answer_text,
-            "similarity": similarity + keyword_score
-        })
-
-    return temp_answers
-
-
-async def get_answers(query: str, db: AsyncSession):
-
-    vocab = VOCAB_CACHE or []
-
-    sub_questions = split_query(query)
-
-    all_queries = list(dict.fromkeys([query] + sub_questions))
-
-    sql = text("""
-        SELECT
-            fq.question_text,
-            fa.answer_text,
-            1 - (fq.question_vector <=> CAST(:qv AS vector)) AS similarity
-        FROM faq_questions fq
-        JOIN faq_answers fa ON fa.question_id = fq.id
-        JOIN faq_documents fd ON fd.id = fq.document_id
-        WHERE fq.status = 'active'
-        AND fa.status = 'active'
-        AND fd.status = 'active'
-        ORDER BY fq.question_vector <=> CAST(:qv AS vector)
-        LIMIT 5
-    """)
-
-    task_list = [process_single_query(q, db, vocab, sql) for q in all_queries]
-
-    results = await asyncio.gather(*task_list, return_exceptions=True)
-
-    answers = []
-
-    for res in results:
-        if isinstance(res, Exception):
-            logger.error(f"Query error: {res}")
-        else:
-            answers.extend(res)
-
-    unique_answers = {}
-
-    for a in answers:
-
-        key = a["question"]
-
-        if key not in unique_answers or a["similarity"] > unique_answers[key]["similarity"]:
-            unique_answers[key] = a
-
-    return sorted(unique_answers.values(), key=lambda x: x["similarity"], reverse=True)[:TOP_N_RESULTS]
-
-
 # ============================================================
-# SIMPLE SEARCH
+# FAQ SEARCH
 # ============================================================
+
 @faq_router.get("/search", response_model=ApiResponse)
-async def search_faq_simple(
-        question: Optional[str] = Query(None),
-        query: Optional[str] = Query(None),
-        db: AsyncSession = Depends(get_db)
+async def search_faq(
+    question: Optional[str] = Query(None),
+    query: Optional[str]    = Query(None),
+    type_id: Optional[int]  = Query(None),
+    db: NeonHTTPSession = Depends(get_db)
 ):
-
-    search_text = question or query
-
-    if not search_text:
-        return ApiResponse(False, 400, "Please provide question or query")
 
     try:
 
-        vocab = VOCAB_CACHE or []
+        search_text = question or query
 
-        clean_query = preprocess_query(search_text, vocab)
+        if not search_text:
+            return ApiResponse(False, 400, "Provide question or query")
 
+        search_text = search_text.strip()
+
+        if not search_text:
+            return ApiResponse(False, 400, "Query cannot be empty")
+
+        if len(search_text) > MAX_QUERY_LENGTH:
+            return ApiResponse(False, 400, "Query too long")
+
+        clean_query = preprocess_query(search_text)
+
+        # Cache key includes type_id so different types
+        # don't return each other's cached results
+        cache_key = (
+            f"{clean_query}__tid_{type_id}"
+            if type_id else clean_query
+        )
+
+        cached = RESPONSE_CACHE.get(cache_key)
+
+        if cached:
+            return ApiResponse(**cached)
+
+        # VECTOR
         query_vector = await get_vector_cached(clean_query)
+        vector_str   = vector_to_str(query_vector)
 
-        sql = text("""
-            SELECT
-                fq.id AS question_id,
-                fq.document_id,
-                fq.type_master_id AS type_id,
-                fq.question_text,
-                1 - (fq.question_vector <=> CAST(:qv AS vector)) AS similarity
-            FROM faq_questions fq
-            LEFT JOIN faq_documents fd ON fd.id = fq.document_id
-            WHERE fq.status = true
-            AND (fd.status = true OR fd.id IS NULL)
-            ORDER BY fq.question_vector <=> CAST(:qv AS vector)
-            LIMIT 1
-        """)
+        # Build WHERE clause — optional type filter
+        if type_id is not None:
 
-        result = await db.execute(sql, {"qv": vector_to_str(query_vector)})
+            result = await db.execute(
+                text("""
+                    SELECT
+                        fq.id            AS question_id,
+                        fq.question_text,
+                        fq.type_master_id,
+                        fq.document_id,
+                        1 - (fq.question_vector <=> CAST(:qv AS vector))
+                            AS similarity
+                    FROM faq_questions fq
+                    WHERE fq.status = true
+                    AND fq.type_master_id = :tid
+                    ORDER BY fq.question_vector <=> CAST(:qv AS vector)
+                    LIMIT 1
+                """),
+                {
+                    "qv":  vector_str,
+                    "tid": type_id
+                }
+            )
+
+        else:
+
+            result = await db.execute(
+                text("""
+                    SELECT
+                        fq.id            AS question_id,
+                        fq.question_text,
+                        fq.type_master_id,
+                        fq.document_id,
+                        1 - (fq.question_vector <=> CAST(:qv AS vector))
+                            AS similarity
+                    FROM faq_questions fq
+                    WHERE fq.status = true
+                    ORDER BY fq.question_vector <=> CAST(:qv AS vector)
+                    LIMIT 1
+                """),
+                {"qv": vector_str}
+            )
 
         row = result.fetchone()
 
         if not row:
-            return ApiResponse(False, 404, "No answer found")
+            return ApiResponse(False, 404, "No match found")
 
         similarity = float(row.similarity or 0)
 
         if similarity < SIMILARITY_THRESHOLD:
             return ApiResponse(False, 404, "No relevant answer found")
 
-        answers_result = await db.execute(text("""
-            SELECT id AS answer_id, answer_text
-            FROM faq_answers
-            WHERE question_id = :qid
-            AND status = true
-        """), {"qid": row.question_id})
+        # FETCH ANSWERS — DISTINCT ON answer_text to remove duplicates
+        answers_result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (answer_text)
+                    id          AS answer_id,
+                    answer_text
+                FROM faq_answers
+                WHERE question_id = :qid
+                AND status = true
+                ORDER BY answer_text, id ASC
+            """),
+            {"qid": row.question_id}
+        )
 
-        answers = answers_result.fetchall()
+        answer_rows = answers_result.fetchall()
+
+        answers = [
+            {
+                "answer_id":   str(a.answer_id),
+                "answer_text": a.answer_text
+            }
+            for a in answer_rows
+        ]
+
+        response_data = {
+            "question_id":    str(row.question_id),
+            "question":       row.question_text,
+            "type_master_id": str(row.type_master_id) if row.type_master_id else None,
+            "document_id":    str(row.document_id) if row.document_id else None,
+            "similarity":     round(similarity, 4),
+            "answers":        answers
+        }
+
+        response = ApiResponse(True, 200, "Answer found", response_data)
+
+        RESPONSE_CACHE.set(cache_key, response.dict())
+
+        return response
+
+    except Exception:
+        logger.exception("FAQ SEARCH ERROR")
+        return ApiResponse(False, 500, "Internal server error")
+
+
+# ============================================================
+# FAQ SEARCH — TOP N RESULTS
+# ============================================================
+
+@faq_router.get("/search/top", response_model=ApiResponse)
+async def search_faq_top(
+    question: Optional[str] = Query(None),
+    query: Optional[str]    = Query(None),
+    type_id: Optional[int]  = Query(None),
+    top_k: int              = Query(3, ge=1, le=10),
+    db: NeonHTTPSession = Depends(get_db)
+):
+    """
+    Top-N similar questions return karta hai with their answers.
+    Useful when frontend ko multiple suggestions dikhane ho.
+    """
+
+    try:
+
+        search_text = question or query
+
+        if not search_text:
+            return ApiResponse(False, 400, "Provide question or query")
+
+        search_text = search_text.strip()
+
+        if not search_text:
+            return ApiResponse(False, 400, "Query cannot be empty")
+
+        if len(search_text) > MAX_QUERY_LENGTH:
+            return ApiResponse(False, 400, "Query too long")
+
+        clean_query  = preprocess_query(search_text)
+        query_vector = await get_vector_cached(clean_query)
+        vector_str   = vector_to_str(query_vector)
+
+        # FETCH TOP-K QUESTIONS
+        if type_id is not None:
+
+            result = await db.execute(
+                text("""
+                    SELECT
+                        fq.id            AS question_id,
+                        fq.question_text,
+                        fq.type_master_id,
+                        fq.document_id,
+                        1 - (fq.question_vector <=> CAST(:qv AS vector))
+                            AS similarity
+                    FROM faq_questions fq
+                    WHERE fq.status = true
+                    AND fq.type_master_id = :tid
+                    ORDER BY fq.question_vector <=> CAST(:qv AS vector)
+                    LIMIT :topk
+                """),
+                {
+                    "qv":   vector_str,
+                    "tid":  type_id,
+                    "topk": top_k
+                }
+            )
+
+        else:
+
+            result = await db.execute(
+                text("""
+                    SELECT
+                        fq.id            AS question_id,
+                        fq.question_text,
+                        fq.type_master_id,
+                        fq.document_id,
+                        1 - (fq.question_vector <=> CAST(:qv AS vector))
+                            AS similarity
+                    FROM faq_questions fq
+                    WHERE fq.status = true
+                    ORDER BY fq.question_vector <=> CAST(:qv AS vector)
+                    LIMIT :topk
+                """),
+                {
+                    "qv":   vector_str,
+                    "topk": top_k
+                }
+            )
+
+        rows = result.fetchall()
+
+        if not rows:
+            return ApiResponse(False, 404, "No matches found")
+
+        # Filter by threshold
+        matched = [
+            r for r in rows
+            if float(r.similarity or 0) >= SIMILARITY_THRESHOLD
+        ]
+
+        if not matched:
+            return ApiResponse(False, 404, "No relevant answers found")
+
+        question_ids = [r.question_id for r in matched]
+
+        # FETCH ANSWERS — DISTINCT ON (question_id, answer_text) to remove duplicates
+        answers_result = await db.execute(
+            text("""
+                SELECT DISTINCT ON (question_id, answer_text)
+                    id          AS answer_id,
+                    question_id,
+                    answer_text
+                FROM faq_answers
+                WHERE question_id = ANY(:qids)
+                AND status = true
+                ORDER BY question_id, answer_text, id ASC
+            """),
+            {"qids": question_ids}
+        )
+
+        all_answers = answers_result.fetchall()
+
+        answers_map: dict = {}
+
+        for a in all_answers:
+            answers_map.setdefault(a.question_id, []).append(
+                {
+                    "answer_id":   str(a.answer_id),
+                    "answer_text": a.answer_text
+                }
+            )
+
+        items = [
+            {
+                "question_id":    str(r.question_id),
+                "question":       r.question_text,
+                "type_master_id": str(r.type_master_id) if r.type_master_id else None,
+                "document_id":    str(r.document_id) if r.document_id else None,
+                "similarity":     round(float(r.similarity or 0), 4),
+                "answers":        answers_map.get(r.question_id, [])
+            }
+            for r in matched
+        ]
 
         return ApiResponse(
-            True,
-            200,
-            "Answer found",
+            True, 200,
+            "Results found",
             {
-                "question": row.question_text,
-                "similarity": round(similarity, 3),
-                "answers": [
-                    {"answer_id": a.answer_id, "answer_text": a.answer_text}
-                    for a in answers
-                ]
+                "total":   len(items),
+                "results": items
             }
         )
 
-    except Exception as e:
-        logger.error(e)
-        return ApiResponse(False, 500, "Something went wrong", str(e))
-
-
-# ============================================================
-# LLM SEARCH
-# ============================================================
-@router.get("/search", response_model=ApiResponse)
-async def search_faq(query: str, db: AsyncSession = Depends(get_db)):
-
-    start_time = time.time()
-
-    if len(query) > MAX_QUERY_LENGTH:
-        return ApiResponse(False, 400, "Query too long")
-
-    if query in RESPONSE_CACHE:
-        return RESPONSE_CACHE[query]
-
-    answers = await get_answers(query, db)
-
-    if not answers:
-        return ApiResponse(False, 404, "No relevant answers found")
-
-    context = "\n\n".join(
-        f"Question: {a['question']}\nAnswer: {a['answer']}"
-        for a in answers
-    )
-
-    try:
-        llm_response = await generate_llm_answer(query, context)
-    except Exception as e:
-        logger.error(e)
-        llm_response = "LLM failed"
-
-    response = ApiResponse(
-        True,
-        200,
-        "Answers generated successfully",
-        {
-            "query": query,
-            "llm_answer": llm_response,
-            "vector_results": answers
-        }
-    )
-
-    RESPONSE_CACHE[query] = response
-
-    logger.info(f"Time taken: {time.time() - start_time:.2f}s")
-
-    return response
-
-
-# ============================================================
-# STREAMING SEARCH
-# ============================================================
-@router.get("/search-stream")
-async def search_stream(
-        request: Request,
-        query: str,
-        db: AsyncSession = Depends(get_db)
-):
-
-    answers = await get_answers(query, db)
-
-    if not answers:
-        return StreamingResponse(iter(["data: No answer\n\n"]), media_type="text/event-stream")
-
-    context = "\n\n".join(
-        f"Question: {a['question']}\nAnswer: {a['answer']}"
-        for a in answers
-    )
-
-    async def generator():
-
-        yield "event: start\ndata: Generating...\n\n"
-
-        buffer = ""
-
-        async for chunk in generate_llm_stream(query, context):
-
-            if await request.is_disconnected():
-                break
-
-            if chunk == "[DONE]":
-                break
-
-            buffer += chunk
-
-            if len(buffer) > 20:
-                yield f"data: {buffer}\n\n"
-                buffer = ""
-
-        if buffer:
-            yield f"data: {buffer}\n\n"
-
-        yield "event: end\ndata: done\n\n"
-
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    except Exception:
+        logger.exception("FAQ SEARCH TOP ERROR")
+        return ApiResponse(False, 500, "Internal server error")
