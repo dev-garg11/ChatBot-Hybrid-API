@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # -------------------- APP INIT --------------------
 app = FastAPI(
     title="ChatBot API",
-    version="1.0.0",
+    version="3.0.0",
     description="FastAPI + Neon PostgreSQL example with async CRUD support.",
 )
 
