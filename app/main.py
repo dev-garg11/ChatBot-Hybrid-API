@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,7 +62,7 @@ async def root():
         "docs": "/docs",
     }
 
-# health check (Render ke liye important)
+# Render health check
 @app.get("/ping")
 async def ping():
     return {"status": "alive"}
@@ -76,3 +77,9 @@ async def database_health():
 
 # -------------------- INCLUDE ROUTER --------------------
 app.include_router(router)
+
+# -------------------- OPTIONAL: LOCAL RUN --------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
