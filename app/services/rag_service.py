@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 from app.services.chunk_service import search_pdf_chunks
 from app.utilis.llm_service import generate_llm_answer
 from app.utilis.reranker import gemini_rerank
@@ -12,11 +15,23 @@ from app.core.config_values import (
     RAG_SOURCE_LIMIT
 )
 
-import logging
 logger = logging.getLogger(__name__)
 
 
-# ✅ Context Builder (fixed + structured)
+# =========================
+# SAFE ASYNC CALL (NEW)
+# =========================
+async def safe_call(coro, timeout=15):
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except Exception as e:
+        logger.warning(f"⚠️ Timeout/Error: {e}")
+        return None
+
+
+# =========================
+# CONTEXT BUILDER
+# =========================
 def build_context(chunks, top_n=3, max_chars_per_chunk=1000):
     selected = chunks[:top_n]
 
@@ -30,17 +45,21 @@ def build_context(chunks, top_n=3, max_chars_per_chunk=1000):
     return "\n\n".join(context_parts)
 
 
-# ✅ Main RAG Function
-async def get_rag_answer(query: str, db, top_k: int = 5,type_id: int = None):
+# =========================
+# MAIN RAG FUNCTION
+# =========================
+async def get_rag_answer(query: str, db, top_k: int = 5, type_id: int = None):
 
     try:
-        # 🔍 Retrieve
-        chunks = await search_pdf_chunks(db, query,type_master_id=type_id, top_k=top_k)
-        logger.info(f"Chunks fetched: {len(chunks)}")
+        # 🔍 Step 1: Retrieve (safe)
+        chunks = await safe_call(
+            search_pdf_chunks(db, query, type_master_id=type_id, top_k=top_k)
+        )
 
         if not chunks:
-            logger.info("No chunks found, using Google Search...")
-            search_results = await google_search(query)
+            logger.info("No chunks found, fallback to Google")
+
+            search_results = await safe_call(google_search(query))
 
             if not search_results:
                 return {
@@ -48,32 +67,31 @@ async def get_rag_answer(query: str, db, top_k: int = 5,type_id: int = None):
                     "sources": []
                 }
 
-            # Google results se context banao
             context = "\n\n".join([
                 f"Title: {r['title']}\n{r['snippet']}"
                 for r in search_results
             ])
 
-            answer = await generate_llm_answer(query, context)
+            answer = await safe_call(generate_llm_answer(query, context)) \
+                     or "No answer available"
 
             return {
                 "answer": answer,
                 "sources": search_results
             }
 
-        # 🔥 Filter
+        logger.info(f"Chunks fetched: {len(chunks)}")
+
+        # 🔥 Step 2: Filter
         filtered_chunks = [
             c for c in chunks if c.get("similarity", 0) >= RAG_SIMILARITY_THRESHOLD
         ]
 
-        logger.info(f"Filtered chunks: {len(filtered_chunks)}")
-
-        # ⚠️ Fallback if filter too strict
         if not filtered_chunks:
-            logger.warning("No chunks passed threshold, using fallback")
+            logger.warning("No chunks passed threshold, fallback")
             filtered_chunks = chunks[:top_k]
 
-        # 🔥 Sort
+        # 🔥 Step 3: Sort
         filtered_chunks = sorted(
             filtered_chunks,
             key=lambda x: x.get("similarity", 0),
@@ -83,30 +101,26 @@ async def get_rag_answer(query: str, db, top_k: int = 5,type_id: int = None):
         best_score = filtered_chunks[0].get("similarity", 0)
         logger.info(f"Top similarity: {best_score}")
 
-        # 🚀 DIRECT ANSWER (fast path)
+        # 🚀 Step 4: Direct Answer
         if best_score >= RAG_DIRECT_THRESHOLD:
             context = build_context(filtered_chunks, top_n=2)
 
-            try:
-                answer = await generate_llm_answer(query, context)
-            except Exception as e:
-                logger.warning(f"LLM failed (direct path): {e}")
-                answer = filtered_chunks[0].get("content", "")
+            answer = await safe_call(generate_llm_answer(query, context)) \
+                     or filtered_chunks[0].get("content", "")
 
             return {
                 "answer": answer,
                 "sources": filtered_chunks[:RAG_SOURCE_LIMIT]
             }
 
-        # 🚀 RERANK (safe)
+        # 🔁 Step 5: Rerank
         if len(filtered_chunks) >= RAG_RERANK_MIN:
-            try:
-                logger.info("🔁 Running reranker...")
-                filtered_chunks = await gemini_rerank(query, filtered_chunks)
-            except Exception as e:
-                logger.warning(f"Reranker failed: {e}")
+            logger.info("🔁 Running reranker...")
+            reranked = await safe_call(gemini_rerank(query, filtered_chunks))
+            if reranked:
+                filtered_chunks = reranked
 
-        # 🔥 Build Context
+        # 🔥 Step 6: Context build
         context = build_context(filtered_chunks, top_n=RAG_CONTEXT_TOP_N)
 
         if not context.strip():
@@ -115,16 +129,9 @@ async def get_rag_answer(query: str, db, top_k: int = 5,type_id: int = None):
                 "sources": []
             }
 
-        # 🤖 LLM Answer (safe)
-        try:
-            answer = await generate_llm_answer(query, context)
-        except Exception as e:
-            logger.warning(f"LLM failed: {e}")
-            answer = filtered_chunks[0].get("content", "")
-
-        # 🔁 Fallback if LLM returns empty
-        if not answer or not answer.strip():
-            answer = filtered_chunks[0].get("content", "")
+        # 🤖 Step 7: LLM Answer
+        answer = await safe_call(generate_llm_answer(query, context)) \
+                 or filtered_chunks[0].get("content", "")
 
         return {
             "answer": answer,

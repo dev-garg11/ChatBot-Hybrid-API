@@ -27,29 +27,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------- STARTUP --------------------
+# -------------------- STARTUP (NON-BLOCKING) --------------------
 @app.on_event("startup")
-async def startup_event() -> None:
-    logger.info("🚀 Starting application...")
+async def startup_event():
+    logger.info("🚀 App starting (non-blocking)...")
 
-    # Init DB models (safe timeout)
-    try:
-        await asyncio.wait_for(init_models(), timeout=10)
-        logger.info("✅ Database models initialized successfully.")
-    except Exception as e:
-        logger.warning(f"⚠️ init_models failed: {e}")
+    async def init_db():
+        try:
+            await init_models()
+            logger.info("✅ Database models initialized.")
+        except Exception as e:
+            logger.warning(f"⚠️ init_models failed: {e}")
 
-    # DB connection check (safe timeout)
-    try:
-        db_connected, message = await asyncio.wait_for(
-            check_database_connection(), timeout=10
-        )
-        if db_connected:
-            logger.info(f"✅ Database connected: {message}")
-        else:
-            logger.warning(f"❌ Database check failed: {message}")
-    except Exception as e:
-        logger.warning(f"❌ Database connection error: {e}")
+    async def check_db():
+        try:
+            ok, message = await check_database_connection()
+            if ok:
+                logger.info(f"✅ DB connected: {message}")
+            else:
+                logger.warning(f"❌ DB check failed: {message}")
+        except Exception as e:
+            logger.warning(f"❌ DB connection error: {e}")
+
+    # 👉 Run in background (IMPORTANT)
+    asyncio.create_task(init_db())
+    asyncio.create_task(check_db())
 
 # -------------------- ROUTES --------------------
 @app.get("/")
@@ -59,15 +61,18 @@ async def root():
         "docs": "/docs",
     }
 
-# simple health check (VERY IMPORTANT for Render)
+# health check (Render ke liye important)
 @app.get("/ping")
 async def ping():
     return {"status": "alive"}
 
 @app.get("/health/database")
 async def database_health():
-    ok, message = await check_database_connection()
-    return {"ok": ok, "message": message}
+    try:
+        ok, message = await check_database_connection()
+        return {"ok": ok, "message": message}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
 
 # -------------------- INCLUDE ROUTER --------------------
 app.include_router(router)

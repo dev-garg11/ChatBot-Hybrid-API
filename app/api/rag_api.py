@@ -11,7 +11,6 @@ from app.utilis.query_processing import process_query
 from app.utilis.query_control import should_rewrite
 from app.utilis.response import ApiResponse
 
-# 🔥 CONFIG
 from app.core.config_values import (
     MAX_TOP_K,
     MIN_QUERY_LENGTH,
@@ -23,19 +22,24 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 🔥 COMMON PIPELINE (NEW)
+# COMMON PIPELINE
 # ============================================================
 
 async def process_pipeline(query: str):
-    query = process_query(query)
+    try:
+        query = process_query(query)
 
-    if should_rewrite(query):
-        logger.info("🔁 Rewriting query...")
-        query = await rewrite_query(query)
-    else:
-        logger.info("⚡ Using original query")
+        if should_rewrite(query):
+            logger.info("🔁 Rewriting query...")
+            query = await rewrite_query(query)
+        else:
+            logger.info("⚡ Using original query")
 
-    return query
+        return query
+
+    except Exception as e:
+        logger.error(f"❌ Pipeline error: {e}")
+        return query  # fallback
 
 
 # ============================================================
@@ -71,6 +75,7 @@ class AskRequest(BaseModel):
 # ============================================================
 # RAG API
 # ============================================================
+
 @router.post("/ask")
 async def ask_question(
     request: AskRequest,
@@ -84,7 +89,11 @@ async def ask_question(
         result = await get_rag_answer(query, db, top_k=request.top_k)
 
         if not result or not result.get("answer"):
-            return ApiResponse(success=False, status_code=404, message="No relevant answer found")
+            return ApiResponse(
+                success=False,
+                status_code=404,
+                message="No relevant answer found"
+            )
 
         return ApiResponse(
             success=True,
@@ -103,6 +112,10 @@ async def ask_question(
         raise HTTPException(status_code=500, detail="RAG processing failed")
 
 
+# ============================================================
+# CHAT API
+# ============================================================
+
 @router.post("/chat")
 async def chat(
     request: AskRequest,
@@ -116,7 +129,11 @@ async def chat(
         result = await get_hybrid_answer(query, db)
 
         if not result or not result.get("answer"):
-            return ApiResponse(success=False, status_code=404, message="No answer found")
+            return ApiResponse(
+                success=False,
+                status_code=404,
+                message="No answer found"
+            )
 
         return ApiResponse(
             success=True,
