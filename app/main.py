@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ChatBot API",
     version="3.0.0",
-    description="FastAPI + Neon PostgreSQL example with async CRUD support.",
+    description="FastAPI + Neon PostgreSQL async backend.",
 )
 
 # -------------------- CORS --------------------
@@ -28,10 +28,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------- STARTUP (NON-BLOCKING) --------------------
+# -------------------- STARTUP --------------------
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🚀 App starting (non-blocking)...")
+    logger.info("🚀 App starting...")
 
     async def init_db():
         try:
@@ -50,7 +50,6 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"❌ DB connection error: {e}")
 
-    # 👉 Run in background (IMPORTANT)
     asyncio.create_task(init_db())
     asyncio.create_task(check_db())
 
@@ -62,7 +61,6 @@ async def root():
         "docs": "/docs",
     }
 
-# Render health check
 @app.get("/ping")
 async def ping():
     return {"status": "alive"}
@@ -75,11 +73,19 @@ async def database_health():
     except Exception as e:
         return {"ok": False, "message": str(e)}
 
-# -------------------- INCLUDE ROUTER --------------------
+# -------------------- ROUTER --------------------
 app.include_router(router)
 
-# -------------------- OPTIONAL: LOCAL RUN --------------------
+# -------------------- LOCAL RUN ONLY --------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
+
+    port = int(os.environ.get("PORT", 8000))
+
+    logger.info(f"Starting server on port {port}")
+
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=port
+    )
